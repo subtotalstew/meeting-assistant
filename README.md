@@ -65,8 +65,45 @@ go test ./...
 
 ## Команды CLI
 
-Появятся в вехе «cli»: `start`, `load <path>`, `list`, `status <id>`, `get <id>`,
-`find <keyword>`, `chat <text>`, плюс `retry`, `delete`, `export`, `stats`.
+| Команда | Что делает |
+|---|---|
+| `start --user <id>` | регистрирует пользователя и печатает его идентификатор |
+| `load <path> --user <id>` | создаёт встречу и задачу, ждёт завершения обработки |
+| `list --user <id>` | встречи пользователя: id, дата, статус, описание |
+| `status <id> --user <id>` | статус, даты, число попыток, текст ошибки |
+| `get <id> --user <id>` | полная транскрипция |
+| `summary <id> --user <id>` | краткая выжимка |
+| `find <keyword> --user <id>` | поиск по своим встречам с фрагментом текста |
+| `chat "<вопрос>" -m <id> --user <id>` | вопрос по материалам встречи |
+| `serve` | только фоновая обработка, до Ctrl+C |
+
+Флаг `--json` включает машинный вывод, `--user` задаёт пользователя.
+
+### Где живёт фоновая обработка
+
+Воркеры запускаются в том же процессе, что и CLI, поэтому `load` по умолчанию
+дожидается завершения: иначе процесс завершится и задача останется в очереди.
+Для асинхронного сценария — два процесса:
+
+```bash
+meeting-assistant load meeting.ogg --user alice --no-wait   # только создать задачу
+meeting-assistant serve                                     # разобрать очередь
+meeting-assistant status <id> --user alice                  # наблюдать прогресс
+```
+
+`serve` при старте возвращает в очередь задачи, прерванные прошлым запуском,
+поэтому «потерянных» встреч не остаётся.
+
+### Сквозной сценарий
+
+```bash
+meeting-assistant start --user alice
+meeting-assistant load ./meeting.ogg --user alice
+meeting-assistant list --user alice
+meeting-assistant summary <id> --user alice
+meeting-assistant find "релиз" --user alice
+meeting-assistant chat "Когда релиз?" -m <id> --user alice
+```
 
 ## Тесты
 

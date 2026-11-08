@@ -120,7 +120,7 @@ func buildSummary(title, transcript string) string {
 		if len([]rune(sentence)) < minSentenceRunes {
 			continue
 		}
-		points = append(points, ". "+strings.TrimSpace(sentence))
+		points = append(points, "- "+strings.TrimSpace(sentence))
 		if len(points) == maxSummaryPoints {
 			break
 		}
@@ -136,7 +136,7 @@ func buildSummary(title, transcript string) string {
 		header += " «" + title + "»"
 	}
 
-	return header + ":" + strings.Join(points, "\n")
+	return header + ":\n" + strings.Join(points, "\n")
 }
 
 // splitSentences режет текст на предложения по знакам конца предложения.
