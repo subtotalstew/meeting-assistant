@@ -28,6 +28,7 @@ type fakeRepo struct {
 	getMeetingFunc          func(ctx context.Context, id, userID uuid.UUID) (domain.Meeting, error)
 	listMeetingsFunc        func(ctx context.Context, userID uuid.UUID, limit int) ([]domain.MeetingItem, error)
 	deleteMeetingFunc       func(ctx context.Context, id, userID uuid.UUID) error
+	resetForRetryFunc       func(ctx context.Context, meetingID uuid.UUID) error
 	getTaskFunc             func(ctx context.Context, meetingID uuid.UUID) (domain.Task, error)
 	getTranscriptionFunc    func(ctx context.Context, meetingID, userID uuid.UUID) (domain.Transcription, error)
 	getSummaryFunc          func(ctx context.Context, meetingID, userID uuid.UUID) (domain.Summary, error)
@@ -82,6 +83,13 @@ func (f *fakeRepo) GetTask(ctx context.Context, meetingID uuid.UUID) (domain.Tas
 		return domain.Task{}, errors.New("GetTask не ожидался в этом тесте")
 	}
 	return f.getTaskFunc(ctx, meetingID)
+}
+
+func (f *fakeRepo) ResetForRetry(ctx context.Context, meetingID uuid.UUID) error {
+	if f.resetForRetryFunc == nil {
+		return errors.New("ResetForRetry не ожидался в этом тесте")
+	}
+	return f.resetForRetryFunc(ctx, meetingID)
 }
 
 func (f *fakeRepo) GetTranscription(ctx context.Context, meetingID, userID uuid.UUID) (domain.Transcription, error) {
@@ -449,5 +457,94 @@ func TestStatusCombinesMeetingAndTask(t *testing.T) {
 	}
 	if status.ErrorMessage() != "speech недоступен" {
 		t.Errorf("текст ошибки = %q", status.ErrorMessage())
+	}
+}
+
+func TestRetryResetsFailedMeeting(t *testing.T) {
+	meetingID := uuid.New()
+	reset := false
+	queue := &fakeQueue{}
+
+	repo := &fakeRepo{
+		getMeetingFunc: func(context.Context, uuid.UUID, uuid.UUID) (domain.Meeting, error) {
+			return domain.Meeting{ID: meetingID, Status: domain.StatusFailed, Error: "внешний сервис недоступен"}, nil
+		},
+		resetForRetryFunc: func(_ context.Context, gotID uuid.UUID) error {
+			if gotID != meetingID {
+				t.Errorf("сброшена встреча %s, ожидалась %s", gotID, meetingID)
+			}
+			reset = true
+			return nil
+		},
+	}
+
+	meeting, err := newTestService(repo, queue, DefaultOptions()).
+		Retry(context.Background(), uuid.New(), meetingID)
+	if err != nil {
+		t.Fatalf("Retry() вернул ошибку: %v", err)
+	}
+
+	if !reset {
+		t.Error("задача не сброшена для повтора")
+	}
+	if meeting.Status != domain.StatusCreated {
+		t.Errorf("статус после повтора = %q, ожидался created", meeting.Status)
+	}
+	if len(queue.enqueued) != 1 || queue.enqueued[0] != meetingID {
+		t.Errorf("в очередь поставлено %v, ожидалась %s", queue.enqueued, meetingID)
+	}
+}
+
+func TestRetryRejectsCompletedMeeting(t *testing.T) {
+	repo := &fakeRepo{
+		getMeetingFunc: func(context.Context, uuid.UUID, uuid.UUID) (domain.Meeting, error) {
+			return domain.Meeting{Status: domain.StatusCompleted}, nil
+		},
+		resetForRetryFunc: func(context.Context, uuid.UUID) error {
+			return errors.New("успешную обработку перезапускать нельзя")
+		},
+	}
+
+	_, err := newTestService(repo, &fakeQueue{}, DefaultOptions()).
+		Retry(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, domain.ErrInvalidTransition) {
+		t.Fatalf("ожидалась ErrInvalidTransition, получено: %v", err)
+	}
+}
+
+func TestRetryForQueuedMeetingOnlyEnqueues(t *testing.T) {
+	meetingID := uuid.New()
+	queue := &fakeQueue{}
+
+	repo := &fakeRepo{
+		getMeetingFunc: func(context.Context, uuid.UUID, uuid.UUID) (domain.Meeting, error) {
+			return domain.Meeting{ID: meetingID, Status: domain.StatusCreated}, nil
+		},
+		resetForRetryFunc: func(context.Context, uuid.UUID) error {
+			return errors.New("для created сброс не нужен")
+		},
+	}
+
+	if _, err := newTestService(repo, queue, DefaultOptions()).
+		Retry(context.Background(), uuid.New(), meetingID); err != nil {
+		t.Fatalf("Retry() вернул ошибку: %v", err)
+	}
+
+	if len(queue.enqueued) != 1 {
+		t.Errorf("задача не поставлена в очередь: %v", queue.enqueued)
+	}
+}
+
+func TestRetryHiddenForForeignMeeting(t *testing.T) {
+	repo := &fakeRepo{
+		getMeetingFunc: func(context.Context, uuid.UUID, uuid.UUID) (domain.Meeting, error) {
+			return domain.Meeting{}, domain.ErrNotFound
+		},
+	}
+
+	_, err := newTestService(repo, &fakeQueue{}, DefaultOptions()).
+		Retry(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("ожидалась ErrNotFound, получено: %v", err)
 	}
 }

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -54,6 +55,23 @@ FROM processing_tasks
 WHERE status = 'created'
 ORDER BY created_at
 LIMIT $1`
+
+// qResetForRetryTask возвращает неуспешную задачу в очередь.
+// Условие status = 'failed' не даёт случайно перезапустить успешную обработку.
+const qResetForRetryTask = `
+UPDATE processing_tasks
+SET status      = 'created',
+    started_at  = NULL,
+    finished_at = NULL,
+    error       = '',
+    updated_at  = now()
+WHERE meeting_id = $1 AND status = 'failed'
+RETURNING id`
+
+const qResetForRetryMeeting = `
+UPDATE meetings
+SET status = 'created', error = '', updated_at = now()
+WHERE id = $1`
 
 const qUpsertTranscription = `
 INSERT INTO transcriptions (meeting_id, text, language, provider, created_at)
@@ -178,6 +196,28 @@ WHERE id = $1`
 	}
 
 	return nil
+}
+
+// ResetForRetry возвращает неуспешную встречу в очередь обработки.
+//
+// Повторяется только failed: успешную обработку перезапускать нельзя без явного
+// обоснования, а незавершённую задачу в created восстанавливает RecoverPending.
+func (s *Store) ResetForRetry(ctx context.Context, meetingID uuid.UUID) error {
+	return s.withTx(ctx, func(tx pgx.Tx) error {
+		var taskID uuid.UUID
+		if err := tx.QueryRow(ctx, qResetForRetryTask, meetingID).Scan(&taskID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("%w: повтор возможен только для задачи в статусе failed", domain.ErrInvalidTransition)
+			}
+			return fmt.Errorf("сброс задачи для повтора: %w", err)
+		}
+
+		if _, err := tx.Exec(ctx, qResetForRetryMeeting, meetingID); err != nil {
+			return fmt.Errorf("сброс статуса встречи: %w", err)
+		}
+
+		return nil
+	})
 }
 
 // RecoverPending возвращает в очередь задачи, прерванные предыдущим запуском,

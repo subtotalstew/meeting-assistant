@@ -30,6 +30,7 @@ type meetingRepository interface {
 	ListMeetings(ctx context.Context, userID uuid.UUID, limit int) ([]domain.MeetingItem, error)
 	DeleteMeeting(ctx context.Context, id, userID uuid.UUID) error
 	GetTask(ctx context.Context, meetingID uuid.UUID) (domain.Task, error)
+	ResetForRetry(ctx context.Context, meetingID uuid.UUID) error
 }
 
 type documentRepository interface {

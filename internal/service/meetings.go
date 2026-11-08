@@ -151,6 +151,51 @@ func (s *Service) Summary(ctx context.Context, userID, meetingID uuid.UUID) (dom
 	return summary, nil
 }
 
+// Retry возвращает встречу в очередь обработки.
+//
+// Повтор разрешён для failed и created: первая попытка могла упасть из-за
+// недоступности внешнего сервиса, а created означает, что задача ещё не
+// обрабатывалась. Успешную встречу перезапускать нельзя — это защита от
+// потери уже полученного результата.
+func (s *Service) Retry(ctx context.Context, userID, meetingID uuid.UUID) (domain.Meeting, error) {
+	meeting, err := s.repo.GetMeeting(ctx, meetingID, userID)
+	if err != nil {
+		return domain.Meeting{}, err
+	}
+
+	switch meeting.Status {
+	case domain.StatusFailed:
+		if err := s.repo.ResetForRetry(ctx, meetingID); err != nil {
+			return domain.Meeting{}, err
+		}
+	case domain.StatusCreated:
+		// Задача уже в очереди, достаточно поставить её ещё раз.
+	default:
+		return domain.Meeting{}, fmt.Errorf(
+			"%w: встреча в статусе %s, повтор не требуется",
+			domain.ErrInvalidTransition, meeting.Status,
+		)
+	}
+
+	if err := s.queue.Enqueue(meetingID); err != nil {
+		// Задача осталась в created и будет подхвачена восстановлением.
+		s.log.Warn("не удалось поставить задачу на повтор в очередь",
+			"meeting_id", meetingID.String(),
+			"error", err.Error(),
+		)
+	}
+
+	s.log.Info("встреча поставлена на повторную обработку",
+		"meeting_id", meetingID.String(),
+		"user_id", userID.String(),
+	)
+
+	meeting.Status = domain.StatusCreated
+	meeting.Error = ""
+
+	return meeting, nil
+}
+
 // DeleteMeeting удаляет встречу пользователя вместе со связанными данными.
 func (s *Service) DeleteMeeting(ctx context.Context, userID, meetingID uuid.UUID) error {
 	if err := s.repo.DeleteMeeting(ctx, meetingID, userID); err != nil {
