@@ -18,6 +18,10 @@ var envKeys = []string{
 	"LOG_FORMAT",
 	"SHUTDOWN_TIMEOUT",
 	"AUTO_MIGRATE",
+	"SPEECH_PROVIDER",
+	"SPEECH_TIMEOUT",
+	"LLM_PROVIDER",
+	"LLM_TIMEOUT",
 }
 
 func resetEnv(t *testing.T) {
@@ -56,6 +60,18 @@ func TestLoadDefaults(t *testing.T) {
 	if !cfg.AutoMigrate {
 		t.Error("AutoMigrate = false, ожидалось true")
 	}
+	if cfg.Speech.Provider != ProviderMock {
+		t.Errorf("Speech.Provider = %q, ожидался %q", cfg.Speech.Provider, ProviderMock)
+	}
+	if cfg.Speech.Timeout != defaultSpeechTimeout {
+		t.Errorf("Speech.Timeout = %s, ожидалось %s", cfg.Speech.Timeout, defaultSpeechTimeout)
+	}
+	if cfg.LLM.Provider != ProviderMock {
+		t.Errorf("LLM.Provider = %q, ожидался %q", cfg.LLM.Provider, ProviderMock)
+	}
+	if cfg.LLM.Timeout != defaultLLMTimeout {
+		t.Errorf("LLM.Timeout = %s, ожидалось %s", cfg.LLM.Timeout, defaultLLMTimeout)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -67,6 +83,10 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("LOG_FORMAT", "TEXT")
 	t.Setenv("SHUTDOWN_TIMEOUT", "3s")
 	t.Setenv("AUTO_MIGRATE", "false")
+	t.Setenv("SPEECH_PROVIDER", "YANDEX")
+	t.Setenv("SPEECH_TIMEOUT", "30s")
+	t.Setenv("LLM_PROVIDER", "gigachat")
+	t.Setenv("LLM_TIMEOUT", "2m")
 
 	cfg, err := Load()
 	if err != nil {
@@ -95,6 +115,18 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.AutoMigrate {
 		t.Error("AutoMigrate = true, ожидалось false")
 	}
+	if cfg.Speech.Provider != ProviderYandex {
+		t.Errorf("Speech.Provider = %q, ожидался %q", cfg.Speech.Provider, ProviderYandex)
+	}
+	if cfg.Speech.Timeout != 30*time.Second {
+		t.Errorf("Speech.Timeout = %s, ожидалось 30s", cfg.Speech.Timeout)
+	}
+	if cfg.LLM.Provider != ProviderGigaChat {
+		t.Errorf("LLM.Provider = %q, ожидался %q", cfg.LLM.Provider, ProviderGigaChat)
+	}
+	if cfg.LLM.Timeout != 2*time.Minute {
+		t.Errorf("LLM.Timeout = %s, ожидалось 2m", cfg.LLM.Timeout)
+	}
 }
 
 func TestLoadInvalid(t *testing.T) {
@@ -112,6 +144,9 @@ func TestLoadInvalid(t *testing.T) {
 		{name: "не булево значение", key: "AUTO_MIGRATE", value: "maybe"},
 		{name: "чужая схема DSN", key: "DB_DSN", value: "mysql://user@localhost/db"},
 		{name: "DSN без хоста", key: "DB_DSN", value: "postgres:///meetings"},
+		{name: "неизвестный speech-провайдер", key: "SPEECH_PROVIDER", value: "salute"},
+		{name: "неизвестный LLM-провайдер", key: "LLM_PROVIDER", value: "openai"},
+		{name: "таймаут speech без единиц", key: "SPEECH_TIMEOUT", value: "60"},
 	}
 
 	for _, tc := range cases {

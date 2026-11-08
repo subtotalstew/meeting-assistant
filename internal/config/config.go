@@ -25,20 +25,40 @@ const (
 	FormatText = "text"
 )
 
+// Провайдеры внешних клиентов. Значение попадает в конфигурацию как есть,
+// поэтому список допустимых значений — единственное место, где он описан.
+const (
+	ProviderMock     = "mock"
+	ProviderYandex   = "yandex"
+	ProviderGigaChat = "gigachat"
+)
+
 // Значения по умолчанию.
 const (
 	defaultDSN             = "postgres://meeting:meeting@localhost:5432/meeting?sslmode=disable"
 	defaultMaxConns        = 10
 	defaultConnTimeout     = 5 * time.Second
 	defaultShutdownTimeout = 15 * time.Second
+	defaultSpeechTimeout   = 60 * time.Second
+	defaultLLMTimeout      = 90 * time.Second
 )
 
 // Config — полная конфигурация приложения.
 type Config struct {
 	Database        Database
 	Logger          Logger
+	Speech          Client
+	LLM             Client
 	ShutdownTimeout time.Duration
 	AutoMigrate     bool
+}
+
+// Client — настройки внешнего клиента (speech или LLM).
+type Client struct {
+	// Provider — имя реализации: mock, yandex, gigachat.
+	Provider string
+	// Timeout — предел на один вызов внешнего сервиса.
+	Timeout time.Duration
 }
 
 // Database — параметры подключения к PostgreSQL.
@@ -68,6 +88,14 @@ func Load() (Config, error) {
 		Logger: Logger{
 			Level:  l.logLevel("LOG_LEVEL", slog.LevelInfo),
 			Format: l.oneOf("LOG_FORMAT", FormatJSON, FormatJSON, FormatText),
+		},
+		Speech: Client{
+			Provider: l.oneOf("SPEECH_PROVIDER", ProviderMock, ProviderMock, ProviderYandex),
+			Timeout:  l.durationInRange("SPEECH_TIMEOUT", defaultSpeechTimeout, time.Second, 10*time.Minute),
+		},
+		LLM: Client{
+			Provider: l.oneOf("LLM_PROVIDER", ProviderMock, ProviderMock, ProviderGigaChat),
+			Timeout:  l.durationInRange("LLM_TIMEOUT", defaultLLMTimeout, time.Second, 10*time.Minute),
 		},
 		ShutdownTimeout: l.durationInRange("SHUTDOWN_TIMEOUT", defaultShutdownTimeout, time.Second, 5*time.Minute),
 		AutoMigrate:     l.boolValue("AUTO_MIGRATE", true),
