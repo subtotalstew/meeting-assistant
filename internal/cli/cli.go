@@ -63,6 +63,7 @@ type App struct {
 	jsonOutput  bool
 	noWait      bool
 	waitTimeout time.Duration
+	chatMeeting string
 }
 
 // Execute собирает команды и выполняет их.

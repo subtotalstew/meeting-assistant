@@ -306,3 +306,97 @@ func TestSummaryPrintsText(t *testing.T) {
 		t.Errorf("в выводе нет выжимки: %q", stdout)
 	}
 }
+
+func TestFindRendersHits(t *testing.T) {
+	svc := userStub(t)
+	svc.searchFunc = func(_ context.Context, _ uuid.UUID, query string) ([]domain.SearchHit, error) {
+		if query != "релиз" {
+			t.Errorf("в сервис ушёл запрос %q", query)
+		}
+		return []domain.SearchHit{
+			{
+				MeetingID: uuid.MustParse("22222222-2222-2222-2222-222222222222"),
+				Title:     "Итоги спринта",
+				Status:    domain.StatusCompleted,
+				CreatedAt: time.Now(),
+				Snippet:   "Договорились, что релиз выйдет в пятницу",
+			},
+		}, nil
+	}
+
+	stdout, _, err := run(t, svc, &fakeWorker{}, "find", "релиз", "--user", "alice")
+	if err != nil {
+		t.Fatalf("find вернул ошибку: %v", err)
+	}
+
+	for _, want := range []string{"ФРАГМЕНТ", "релиз выйдет в пятницу"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("в выводе нет %q: %q", want, stdout)
+		}
+	}
+}
+
+func TestFindEmptyResult(t *testing.T) {
+	svc := userStub(t)
+	svc.searchFunc = func(context.Context, uuid.UUID, string) ([]domain.SearchHit, error) {
+		return nil, nil
+	}
+
+	stdout, _, err := run(t, svc, &fakeWorker{}, "find", "бюджет", "--user", "alice")
+	if err != nil {
+		t.Fatalf("find вернул ошибку: %v", err)
+	}
+	if !strings.Contains(stdout, "ничего не найдено") {
+		t.Errorf("нет сообщения о пустом результате: %q", stdout)
+	}
+}
+
+func TestChatPrintsAnswer(t *testing.T) {
+	meetingID := uuid.New()
+
+	svc := userStub(t)
+	svc.askFunc = func(_ context.Context, _ uuid.UUID, gotMeetingID uuid.UUID, question string) (string, error) {
+		if gotMeetingID != meetingID {
+			t.Errorf("вопрос ушёл по встрече %s, ожидалась %s", gotMeetingID, meetingID)
+		}
+		if question != "Когда релиз?" {
+			t.Errorf("вопрос = %q", question)
+		}
+		return "По материалам встречи: релиз выйдет в пятницу.", nil
+	}
+
+	stdout, _, err := run(t, svc, &fakeWorker{}, "chat", "Когда релиз?", "--user", "alice", "--meeting", meetingID.String())
+	if err != nil {
+		t.Fatalf("chat вернул ошибку: %v", err)
+	}
+	if !strings.Contains(stdout, "пятницу") {
+		t.Errorf("в выводе нет ответа: %q", stdout)
+	}
+}
+
+func TestChatRequiresMeeting(t *testing.T) {
+	_, _, err := run(t, userStub(t), &fakeWorker{}, "chat", "Когда релиз?", "--user", "alice")
+	if err == nil {
+		t.Fatal("ожидалась ошибка об отсутствии встречи")
+	}
+	if !strings.Contains(err.Error(), "--meeting") {
+		t.Errorf("ошибка не подсказывает флаг --meeting: %v", err)
+	}
+}
+
+func TestChatJSONOutput(t *testing.T) {
+	meetingID := uuid.New()
+
+	svc := userStub(t)
+	svc.askFunc = func(context.Context, uuid.UUID, uuid.UUID, string) (string, error) {
+		return "ответ", nil
+	}
+
+	stdout, _, err := run(t, svc, &fakeWorker{}, "chat", "вопрос", "--user", "alice", "-m", meetingID.String(), "--json")
+	if err != nil {
+		t.Fatalf("chat вернул ошибку: %v", err)
+	}
+	if !strings.Contains(stdout, "\"answer\": \"ответ\"") {
+		t.Errorf("JSON не содержит ответ: %q", stdout)
+	}
+}
