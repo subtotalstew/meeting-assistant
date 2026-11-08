@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -585,5 +586,53 @@ func TestIntegrationRecoverPending(t *testing.T) {
 	}
 	if len(again) != 2 {
 		t.Fatalf("повторное восстановление вернуло %d задач, ожидалось 2", len(again))
+	}
+}
+
+// Полнотекстовый поиск по GIN-индексу с подсветкой и запасной поиск по подстроке.
+func TestIntegrationSearchFullTextAndSubstring(t *testing.T) {
+	store := storeForTest(t)
+	ctx := context.Background()
+
+	user := createUser(t, store, "olga")
+	meeting, _ := createMeeting(t, store, user, "planning.ogg")
+
+	if err := store.SaveTranscription(ctx, domain.Transcription{
+		MeetingID: meeting.ID,
+		Text:      "Договорились перенести релиз на следующую неделю. Бюджет обсудим отдельно.",
+		Provider:  "mock",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveTranscription: %v", err)
+	}
+
+	// Полное слово: работает полнотекстовый поиск, найденное подсвечено.
+	hits, err := store.SearchMeetings(ctx, user.ID, "релиз", 10)
+	if err != nil {
+		t.Fatalf("SearchMeetings(релиз): %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("найдено %d встреч, ожидалась 1", len(hits))
+	}
+	if !strings.Contains(hits[0].Snippet, "<<релиз>>") {
+		t.Errorf("нет подсветки найденного слова: %q", hits[0].Snippet)
+	}
+
+	// Неполное слово: полнотекстовый поиск не находит лексему, включается подстрока.
+	hits, err = store.SearchMeetings(ctx, user.ID, "рели", 10)
+	if err != nil {
+		t.Fatalf("SearchMeetings(рели): %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("по подстроке найдено %d встреч, ожидалась 1", len(hits))
+	}
+
+	// Ничего не найдено ни одним способом.
+	hits, err = store.SearchMeetings(ctx, user.ID, "ипотека", 10)
+	if err != nil {
+		t.Fatalf("SearchMeetings(ипотека): %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("найдено %d встреч по отсутствующему слову", len(hits))
 	}
 }

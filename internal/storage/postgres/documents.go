@@ -30,9 +30,41 @@ FROM summaries s
 JOIN meetings m ON m.id = s.meeting_id
 WHERE s.meeting_id = $1 AND m.user_id = $2`
 
-// qSearchMeetings ищет подстроку в тексте транскрипции, выжимке или названии.
-// LIMIT не даёт одному запросу вытянуть все материалы пользователя.
-var qSearchMeetings = fmt.Sprintf(`
+// qSearchMeetingsFullText — полнотекстовый поиск по индексам из миграции 00003.
+//
+// Выражение to_tsvector('russian', ...) в предикате должно совпадать с выражением
+// индекса символ в символ, иначе планировщик GIN-индекс не возьмёт.
+// Сравнение идёт по каждой таблице отдельно: t.text и s.text могут быть NULL
+// из-за LEFT JOIN, и тогда @@ даёт NULL, что в WHERE равносильно false.
+const qSearchMeetingsFullText = `
+SELECT m.id,
+       m.title,
+       m.status,
+       m.created_at,
+       ts_headline('russian',
+                   COALESCE(t.text, s.text, m.title),
+                   websearch_to_tsquery('russian', $2),
+                   'StartSel=<<,StopSel=>>,MaxFragments=1,MaxWords=25,MinWords=8') AS snippet
+FROM meetings m
+LEFT JOIN transcriptions t ON t.meeting_id = m.id
+LEFT JOIN summaries s ON s.meeting_id = m.id
+WHERE m.user_id = $1
+  AND (to_tsvector('russian', t.text) @@ websearch_to_tsquery('russian', $2)
+       OR to_tsvector('russian', s.text) @@ websearch_to_tsquery('russian', $2)
+       OR to_tsvector('russian', m.title) @@ websearch_to_tsquery('russian', $2))
+ORDER BY ts_rank(to_tsvector('russian',
+                             COALESCE(t.text, '') || ' ' ||
+                             COALESCE(s.text, '') || ' ' || m.title),
+                 websearch_to_tsquery('russian', $2)) DESC,
+         m.created_at DESC
+LIMIT $3`
+
+// qSearchMeetingsSubstring — запасной поиск по подстроке.
+//
+// Нужен, когда полнотекстовый поиск ничего не нашёл: он ищет по лексемам, поэтому
+// запрос «рели» не найдёт «релиз». Подстрока закрывает этот случай, а LIMIT
+// не даёт одному запросу вытянуть все материалы пользователя.
+var qSearchMeetingsSubstring = fmt.Sprintf(`
 SELECT m.id,
        m.title,
        m.status,
@@ -93,8 +125,11 @@ func (s *Store) GetSummary(ctx context.Context, meetingID, userID uuid.UUID) (do
 	return summary, nil
 }
 
-// SearchMeetings ищет вхождения подстроки в транскрипциях, выжимках и названиях
-// встреч текущего пользователя.
+// SearchMeetings ищет встречи пользователя по тексту.
+//
+// Сначала работает полнотекстовый поиск по индексам, и только если он ничего
+// не нашёл — поиск по подстроке. Такой порядок даёт и релевантную выдачу
+// с подсветкой найденных слов, и ожидаемое поведение для неполных слов.
 func (s *Store) SearchMeetings(ctx context.Context, userID uuid.UUID, query string, limit int) ([]domain.SearchHit, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
@@ -104,9 +139,22 @@ func (s *Store) SearchMeetings(ctx context.Context, userID uuid.UUID, query stri
 		limit = defaultSearchLimit
 	}
 
+	hits, err := s.search(ctx, qSearchMeetingsFullText, userID, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(hits) > 0 {
+		return hits, nil
+	}
+
 	pattern := "%" + escapeLike(query) + "%"
 
-	rows, err := s.pool.Query(ctx, qSearchMeetings, userID, pattern, limit)
+	return s.search(ctx, qSearchMeetingsSubstring, userID, pattern, limit)
+}
+
+// search выполняет один из поисковых запросов и читает результат.
+func (s *Store) search(ctx context.Context, query string, userID uuid.UUID, argument any, limit int) ([]domain.SearchHit, error) {
+	rows, err := s.pool.Query(ctx, query, userID, argument, limit)
 	if err != nil {
 		return nil, fmt.Errorf("поиск по встречам: %w", err)
 	}
