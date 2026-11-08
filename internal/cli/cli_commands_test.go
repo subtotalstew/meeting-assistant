@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -205,5 +206,103 @@ func TestStatusShowsErrorText(t *testing.T) {
 func TestStatusRejectsMalformedID(t *testing.T) {
 	if _, _, err := run(t, userStub(t), &fakeWorker{}, "status", "42", "--user", "alice"); err == nil {
 		t.Fatal("ожидалась ошибка разбора идентификатора")
+	}
+}
+
+func TestListRendersMeetings(t *testing.T) {
+	svc := userStub(t)
+	svc.listMeetingsFunc = func(context.Context, uuid.UUID) ([]domain.MeetingItem, error) {
+		return []domain.MeetingItem{
+			{
+				Meeting: domain.Meeting{
+					ID:        uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+					Title:     "Итоги спринта",
+					Status:    domain.StatusCompleted,
+					CreatedAt: time.Now(),
+				},
+				SummaryPreview: "Договорились о релизе в пятницу",
+			},
+		}, nil
+	}
+
+	stdout, _, err := run(t, svc, &fakeWorker{}, "list", "--user", "alice")
+	if err != nil {
+		t.Fatalf("list вернул ошибку: %v", err)
+	}
+
+	for _, want := range []string{"ID", "СТАТУС", "completed", "релизе в пятницу"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("в выводе нет %q: %q", want, stdout)
+		}
+	}
+}
+
+func TestListEmpty(t *testing.T) {
+	svc := userStub(t)
+	svc.listMeetingsFunc = func(context.Context, uuid.UUID) ([]domain.MeetingItem, error) {
+		return nil, nil
+	}
+
+	stdout, _, err := run(t, svc, &fakeWorker{}, "list", "--user", "alice")
+	if err != nil {
+		t.Fatalf("list вернул ошибку: %v", err)
+	}
+	if !strings.Contains(stdout, "встреч пока нет") {
+		t.Errorf("нет подсказки для пустого списка: %q", stdout)
+	}
+}
+
+func TestGetPrintsTranscription(t *testing.T) {
+	meetingID := uuid.New()
+
+	svc := userStub(t)
+	svc.transcriptionFunc = func(context.Context, uuid.UUID, uuid.UUID) (domain.Transcription, error) {
+		return domain.Transcription{
+			MeetingID: meetingID,
+			Text:      "Обсудили сроки и договорились о релизе.",
+			Provider:  "mock",
+			CreatedAt: time.Now(),
+		}, nil
+	}
+
+	stdout, _, err := run(t, svc, &fakeWorker{}, "get", meetingID.String(), "--user", "alice")
+	if err != nil {
+		t.Fatalf("get вернул ошибку: %v", err)
+	}
+	if !strings.Contains(stdout, "договорились о релизе") {
+		t.Errorf("в выводе нет транскрипции: %q", stdout)
+	}
+}
+
+func TestGetPropagatesNotReady(t *testing.T) {
+	svc := userStub(t)
+	svc.transcriptionFunc = func(context.Context, uuid.UUID, uuid.UUID) (domain.Transcription, error) {
+		return domain.Transcription{}, errors.Join(service.ErrNotReady, errors.New("транскрипция ещё не получена"))
+	}
+
+	if _, _, err := run(t, svc, &fakeWorker{}, "get", uuid.New().String(), "--user", "alice"); err == nil {
+		t.Fatal("ожидалась ошибка о неготовности материалов")
+	}
+}
+
+func TestSummaryPrintsText(t *testing.T) {
+	meetingID := uuid.New()
+
+	svc := userStub(t)
+	svc.summaryFunc = func(context.Context, uuid.UUID, uuid.UUID) (domain.Summary, error) {
+		return domain.Summary{
+			MeetingID: meetingID,
+			Text:      "Ключевое: релиз в пятницу.",
+			Provider:  "mock",
+			CreatedAt: time.Now(),
+		}, nil
+	}
+
+	stdout, _, err := run(t, svc, &fakeWorker{}, "summary", meetingID.String(), "--user", "alice")
+	if err != nil {
+		t.Fatalf("summary вернул ошибку: %v", err)
+	}
+	if !strings.Contains(stdout, "релиз в пятницу") {
+		t.Errorf("в выводе нет выжимки: %q", stdout)
 	}
 }

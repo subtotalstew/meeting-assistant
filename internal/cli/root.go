@@ -32,6 +32,9 @@ func (a *App) rootCommand() *cobra.Command {
 		a.serveCommand(),
 		a.loadCommand(),
 		a.statusCommand(),
+		a.listCommand(),
+		a.getCommand(),
+		a.summaryCommand(),
 	)
 
 	return root
