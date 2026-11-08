@@ -43,10 +43,40 @@ go build -o bin/meeting-assistant ./cmd/meeting-assistant
 go test ./...
 ```
 
+## Конфигурация
+
+Источников три, применяются по порядку: **умолчания → YAML-файл → переменные окружения**.
+Окружение побеждает файл: в контейнере и CI проще переопределить пару ключей, чем
+править файл.
+
+```bash
+CONFIG_FILE=config.example.yaml ./bin/meeting-assistant list --user alice
+```
+
+Пример со всеми полями и комментариями — [config.example.yaml](config.example.yaml):
+
+```yaml
+database:
+  dsn: postgres://meeting:meeting@localhost:5432/meeting?sslmode=disable
+  max_conns: 10
+  conn_timeout: 5s
+worker:
+  concurrency: 4
+  queue_size: 64
+  task_timeout: 10m
+auto_migrate: true
+```
+
+Длительности задаются строками (`500ms`, `5s`, `2m`). Опечатка в имени ключа —
+ошибка, а не молча проигнорированная строка.
+
 ## Переменные окружения
+
+Каждая переменная перекрывает значение из YAML-файла.
 
 | Переменная | По умолчанию | Смысл |
 |---|---|---|
+| `CONFIG_FILE` | — | путь к YAML-файлу настроек |
 | `DB_DSN` | `postgres://meeting:meeting@localhost:5432/meeting?sslmode=disable` | строка подключения |
 | `DB_MAX_CONNS` | `10` | размер пула соединений (1–200) |
 | `DB_CONN_TIMEOUT` | `5s` | таймаут установки соединения |
@@ -54,10 +84,13 @@ go test ./...
 | `LOG_FORMAT` | `json` | `json` или `text` |
 | `SHUTDOWN_TIMEOUT` | `15s` | сколько ждём корректного завершения |
 | `AUTO_MIGRATE` | `true` | накатывать миграции при старте |
-| `SPEECH_PROVIDER` | `mock` | реализация speech-клиента: `mock` или `yandex` |
+| `SPEECH_PROVIDER` | `mock` | реализация speech-клиента: `mock` |
 | `SPEECH_TIMEOUT` | `60s` | таймаут одного вызова распознавания |
-| `LLM_PROVIDER` | `mock` | реализация LLM-клиента: `mock` или `gigachat` |
+| `LLM_PROVIDER` | `mock` | реализация LLM-клиента: `mock` |
 | `LLM_TIMEOUT` | `90s` | таймаут одного вызова модели |
+| `WORKER_CONCURRENCY` | `4` | сколько встреч обрабатывается одновременно (1–64) |
+| `WORKER_QUEUE_SIZE` | `64` | размер буфера очереди задач |
+| `TASK_TIMEOUT` | `10m` | предел на весь цикл обработки одной встречи |
 | `TEST_DATABASE_URL` | — | база для интеграционных тестов; без неё они пропускаются |
 
 Некорректное значение — отказ стартовать с перечислением **всех** проблем сразу.
@@ -143,6 +176,14 @@ TEST_DATABASE_URL='postgres://meeting:meeting@localhost:5432/meeting?sslmode=dis
 SQL-файлы лежат в `migrations/` и встроены в бинарник через `go:embed`.
 Накат выполняется при старте (`AUTO_MIGRATE=true`) через goose: каждая миграция
 применяется в транзакции, поэтому «грязного» состояния схемы не бывает.
+
+## Документация
+
+| Документ | Содержание |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | слои и зависимости, ER-схема, жизненный цикл статусов, асинхронность, права доступа, обработка ошибок |
+| [docs/DEMO.md](docs/DEMO.md) | пошаговый сценарий демонстрации под защиту |
+| [config.example.yaml](config.example.yaml) | конфигурация со всеми полями и комментариями |
 
 ## Архитектура
 
