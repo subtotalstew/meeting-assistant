@@ -29,6 +29,11 @@ SELECT` + meetingColumns + `
 FROM meetings m
 WHERE m.id = $1 AND m.user_id = $2`
 
+const qGetMeetingByID = `
+SELECT` + meetingColumns + `
+FROM meetings m
+WHERE m.id = $1`
+
 // qListMeetings отдаёт встречи вместе с фрагментом выжимки: LEFT JOIN, потому что
 // у свежей встречи выжимки ещё нет, но из списка её терять нельзя.
 var qListMeetings = fmt.Sprintf(`
@@ -86,6 +91,19 @@ func (s *Store) CreateMeeting(ctx context.Context, meeting domain.Meeting, task 
 // и приложение принципиально не различает "не существует" и "принадлежит другому".
 func (s *Store) GetMeeting(ctx context.Context, id, userID uuid.UUID) (domain.Meeting, error) {
 	meeting, err := scanMeeting(s.pool.QueryRow(ctx, qGetMeeting, id, userID))
+	if err != nil {
+		return domain.Meeting{}, wrapNotFound(err, "встреча")
+	}
+	return meeting, nil
+}
+
+// GetMeetingByID возвращает встречу без проверки владельца.
+//
+// Метод нужен фоновому обработчику: он действует от имени системы, а не
+// пользователя, поэтому фильтр по user_id здесь не применяется. Все
+// пользовательские сценарии обязаны идти через GetMeeting.
+func (s *Store) GetMeetingByID(ctx context.Context, id uuid.UUID) (domain.Meeting, error) {
+	meeting, err := scanMeeting(s.pool.QueryRow(ctx, qGetMeetingByID, id))
 	if err != nil {
 		return domain.Meeting{}, wrapNotFound(err, "встреча")
 	}
