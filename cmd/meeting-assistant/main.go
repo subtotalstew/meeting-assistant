@@ -1,7 +1,8 @@
 // Command meeting-assistant — «Умный помощник для конспектирования встреч».
 //
 // Здесь только сборка зависимостей и управление жизненным циклом процесса:
-// конфигурация, логгер, обработка сигналов завершения. Бизнес-логики в этом файле нет.
+// конфигурация, логгер, подключение к базе, миграции, обработка сигналов завершения.
+// Бизнес-логики в этом файле нет.
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 
 	"github.com/subtotalstew/meeting-assistant/internal/config"
 	"github.com/subtotalstew/meeting-assistant/internal/logging"
+	"github.com/subtotalstew/meeting-assistant/internal/storage/postgres"
 )
 
 // version подставляется линкером: -ldflags "-X main.version=1.0.0".
@@ -41,12 +43,25 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	logger.Info("приложение запущено",
-		slog.String("version", version),
-		slog.String("log_format", cfg.Logger.Format),
-	)
+	store, err := postgres.New(ctx, cfg.Database)
+	if err != nil {
+		return fmt.Errorf("подключение к хранилищу: %w", err)
+	}
+	defer func() {
+		store.Close()
+		logger.Info("соединение с PostgreSQL закрыто")
+	}()
 
-	// Следующие вехи добавляют сюда пул PostgreSQL, фоновые обработчики и CLI.
+	if cfg.AutoMigrate {
+		if err := postgres.Migrate(ctx, store.Pool()); err != nil {
+			return fmt.Errorf("миграции: %w", err)
+		}
+		logger.Info("схема базы данных актуальна")
+	}
+
+	logger.Info("приложение запущено", slog.String("version", version))
+
+	// Следующие вехи добавляют сюда пул воркеров и CLI.
 	<-ctx.Done()
 
 	// Возвращаем стандартную реакцию на сигналы: второй Ctrl+C завершит процесс сразу.
@@ -64,8 +79,8 @@ func run() error {
 	return nil
 }
 
-// shutdown освобождает ресурсы в порядке, обратном их созданию.
-// По мере появления слоёв здесь появятся остановка пула воркеров и закрытие БД.
+// shutdown останавливает фоновые обработчики и дожидается их завершения.
+// Появится на вехе worker; пул соединений закрывается отдельно, после этого шага.
 func shutdown(ctx context.Context) error {
 	_ = ctx
 	return nil

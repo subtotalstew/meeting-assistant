@@ -23,7 +23,7 @@
 
 ## Требования
 
-- Go 1.23+
+- Go 1.26+ (столько требуют `pgx v5.12` и `goose v3.29`)
 - Docker (для PostgreSQL и интеграционных тестов)
 - GNU Make (опционально: все цели продублированы обычными командами `go`)
 
@@ -63,6 +63,23 @@ go test ./...
 
 Появятся в вехе «cli»: `start`, `load <path>`, `list`, `status <id>`, `get <id>`,
 `find <keyword>`, `chat <text>`, плюс `retry`, `delete`, `export`, `stats`.
+
+## Тесты
+
+```bash
+go test ./...                    # unit-тесты, интеграционные пропускаются
+TEST_DATABASE_URL='postgres://meeting:meeting@localhost:5432/meeting?sslmode=disable' \
+  go test -race -run Integration ./...
+```
+
+Интеграционные тесты создают собственную схему `test_<timestamp>` и удаляют её после
+прогона, поэтому не мешают данным приложения в `public` и не требуют отдельной базы.
+
+## Миграции
+
+SQL-файлы лежат в `migrations/` и встроены в бинарник через `go:embed`.
+Накат выполняется при старте (`AUTO_MIGRATE=true`) через goose: каждая миграция
+применяется в транзакции, поэтому «грязного» состояния схемы не бывает.
 
 ## Архитектура
 
