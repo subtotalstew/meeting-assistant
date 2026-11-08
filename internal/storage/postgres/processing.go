@@ -33,6 +33,28 @@ WHERE meeting_id = $1
 ORDER BY created_at DESC
 LIMIT 1`
 
+// qResetUnfinishedTasks возвращает в очередь задачи, прерванные остановкой приложения.
+// В рабочем статусе их держать нельзя: следующий запуск не взял бы их в работу.
+const qResetUnfinishedTasks = `
+UPDATE processing_tasks
+SET status      = 'created',
+    started_at  = NULL,
+    finished_at = NULL,
+    updated_at  = now()
+WHERE status IN ('processing', 'transcribed', 'summarized')`
+
+const qResetUnfinishedMeetings = `
+UPDATE meetings
+SET status = 'created', error = '', updated_at = now()
+WHERE status IN ('processing', 'transcribed', 'summarized')`
+
+const qPendingMeetingIDs = `
+SELECT meeting_id
+FROM processing_tasks
+WHERE status = 'created'
+ORDER BY created_at
+LIMIT $1`
+
 const qUpsertTranscription = `
 INSERT INTO transcriptions (meeting_id, text, language, provider, created_at)
 VALUES ($1, $2, $3, $4, $5)
@@ -156,6 +178,51 @@ WHERE id = $1`
 	}
 
 	return nil
+}
+
+// RecoverPending возвращает в очередь задачи, прерванные предыдущим запуском,
+// и отдаёт идентификаторы встреч, которые нужно обработать.
+//
+// Вызывается один раз при старте приложения, до приёма новых команд. Без такого
+// восстановления встреча, прерванная остановкой сервиса, осталась бы навсегда
+// в статусе processing и никто бы её не перезапустил.
+func (s *Store) RecoverPending(ctx context.Context, limit int) ([]uuid.UUID, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+
+	var pending []uuid.UUID
+
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, qResetUnfinishedTasks); err != nil {
+			return fmt.Errorf("сброс незавершённых задач: %w", err)
+		}
+
+		if _, err := tx.Exec(ctx, qResetUnfinishedMeetings); err != nil {
+			return fmt.Errorf("сброс статусов встреч: %w", err)
+		}
+
+		rows, err := tx.Query(ctx, qPendingMeetingIDs, limit)
+		if err != nil {
+			return fmt.Errorf("выборка задач в очереди: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var meetingID uuid.UUID
+			if err := rows.Scan(&meetingID); err != nil {
+				return fmt.Errorf("чтение идентификатора встречи: %w", err)
+			}
+			pending = append(pending, meetingID)
+		}
+
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return pending, nil
 }
 
 func scanTask(row rowScanner) (domain.Task, error) {

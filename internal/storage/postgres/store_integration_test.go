@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/subtotalstew/meeting-assistant/internal/config"
@@ -530,5 +531,59 @@ func TestIntegrationQuestionsHistory(t *testing.T) {
 	}
 	if len(otherQuestions) != 0 {
 		t.Fatalf("чужой пользователь видит %d вопросов", len(otherQuestions))
+	}
+}
+
+// Восстановление после перезапуска: задачи, прерванные остановкой приложения,
+// должны вернуться в очередь, иначе встреча навсегда останется в processing.
+func TestIntegrationRecoverPending(t *testing.T) {
+	store := storeForTest(t)
+	ctx := context.Background()
+
+	user := createUser(t, store, "ivan")
+
+	interrupted, _ := createMeeting(t, store, user, "interrupted.ogg")
+	if _, err := store.StartProcessing(ctx, interrupted.ID); err != nil {
+		t.Fatalf("StartProcessing: %v", err)
+	}
+
+	waiting, _ := createMeeting(t, store, user, "waiting.ogg")
+
+	pending, err := store.RecoverPending(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecoverPending: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("восстановлено %d задач, ожидалось 2", len(pending))
+	}
+
+	for _, meetingID := range []uuid.UUID{interrupted.ID, waiting.ID} {
+		task, err := store.GetTask(ctx, meetingID)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		if task.Status != domain.StatusCreated {
+			t.Errorf("статус задачи = %q, ожидался created", task.Status)
+		}
+		if task.StartedAt != nil {
+			t.Errorf("время старта не сброшено для %s", meetingID)
+		}
+
+		meeting, err := store.GetMeeting(ctx, meetingID, user.ID)
+		if err != nil {
+			t.Fatalf("GetMeeting: %v", err)
+		}
+		if meeting.Status != domain.StatusCreated {
+			t.Errorf("статус встречи = %q, ожидался created", meeting.Status)
+		}
+	}
+
+	// Повторный вызов безопасен: задачи всё ещё created, их снова поставят в очередь.
+	again, err := store.RecoverPending(ctx, 10)
+	if err != nil {
+		t.Fatalf("повторный RecoverPending: %v", err)
+	}
+	if len(again) != 2 {
+		t.Fatalf("повторное восстановление вернуло %d задач, ожидалось 2", len(again))
 	}
 }

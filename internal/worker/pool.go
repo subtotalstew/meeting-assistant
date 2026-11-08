@@ -59,6 +59,11 @@ type taskProcessor interface {
 	Process(ctx context.Context, meetingID uuid.UUID) error
 }
 
+// recoveryStore отдаёт встречи, обработка которых была прервана прошлым запуском.
+type recoveryStore interface {
+	RecoverPending(ctx context.Context, limit int) ([]uuid.UUID, error)
+}
+
 // Pool — пул обработчиков с ограниченным параллелизмом.
 //
 // Лимит параллелизма задаётся количеством воркеров, а не семафором: лишние задачи
@@ -66,6 +71,7 @@ type taskProcessor interface {
 // постоянно и равно Concurrency, сколько бы файлов ни загрузили.
 type Pool struct {
 	processor taskProcessor
+	store     recoveryStore
 	log       *slog.Logger
 	config    Config
 
@@ -81,7 +87,10 @@ type Pool struct {
 }
 
 // NewPool создаёт пул обработчиков. Работа начинается только после Start.
-func NewPool(processor taskProcessor, logger *slog.Logger, cfg Config) *Pool {
+//
+// store нужен для восстановления задач после перезапуска; если он не задан,
+// Recover ничего не делает.
+func NewPool(processor taskProcessor, store recoveryStore, logger *slog.Logger, cfg Config) *Pool {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -90,6 +99,7 @@ func NewPool(processor taskProcessor, logger *slog.Logger, cfg Config) *Pool {
 
 	return &Pool{
 		processor: processor,
+		store:     store,
 		log:       logger,
 		config:    cfg,
 		queue:     make(chan uuid.UUID, cfg.QueueSize),
@@ -142,6 +152,38 @@ func (p *Pool) Active() int64 {
 // Pending возвращает число задач, ожидающих в очереди.
 func (p *Pool) Pending() int {
 	return len(p.queue)
+}
+
+// Recover возвращает в очередь задачи, прерванные предыдущим запуском.
+//
+// Вызывается после Start, до приёма новых команд. Ставить восстановленные задачи
+// нужно блокирующе: если очередь переполнена, лучше подождать, чем потерять
+// встречу, которая осталась в статусе created.
+func (p *Pool) Recover(ctx context.Context) error {
+	if p.store == nil {
+		return nil
+	}
+
+	pending, err := p.store.RecoverPending(ctx, cap(p.queue))
+	if err != nil {
+		return fmt.Errorf("восстановление незавершённых задач: %w", err)
+	}
+
+	if len(pending) == 0 {
+		return nil
+	}
+
+	for _, meetingID := range pending {
+		select {
+		case p.queue <- meetingID:
+		case <-ctx.Done():
+			return fmt.Errorf("постановка восстановленных задач: %w", ctx.Err())
+		}
+	}
+
+	p.log.Info("незавершённые задачи возвращены в очередь", "count", len(pending))
+
+	return nil
 }
 
 // Stop останавливает пул и ждёт завершения воркеров.

@@ -68,7 +68,7 @@ func testLogger() *slog.Logger {
 func TestPoolRespectsConcurrencyLimit(t *testing.T) {
 	processor := &countingProcessor{delay: 20 * time.Millisecond}
 
-	pool := NewPool(processor, testLogger(), Config{Concurrency: 2, QueueSize: 32})
+	pool := NewPool(processor, nil, testLogger(), Config{Concurrency: 2, QueueSize: 32})
 	pool.Start(context.Background())
 	defer func() {
 		if err := pool.Stop(context.Background()); err != nil {
@@ -97,7 +97,7 @@ func TestPoolRespectsConcurrencyLimit(t *testing.T) {
 
 func TestPoolEnqueueFailsWhenQueueFull(t *testing.T) {
 	// Пул не запущен, поэтому очередь не разбирается.
-	pool := NewPool(&countingProcessor{}, testLogger(), Config{Concurrency: 1, QueueSize: 2})
+	pool := NewPool(&countingProcessor{}, nil, testLogger(), Config{Concurrency: 1, QueueSize: 2})
 
 	for i := 0; i < 2; i++ {
 		if err := pool.Enqueue(uuid.New()); err != nil {
@@ -111,7 +111,7 @@ func TestPoolEnqueueFailsWhenQueueFull(t *testing.T) {
 }
 
 func TestPoolRejectsEnqueueAfterStop(t *testing.T) {
-	pool := NewPool(&countingProcessor{}, testLogger(), Config{Concurrency: 1, QueueSize: 4})
+	pool := NewPool(&countingProcessor{}, nil, testLogger(), Config{Concurrency: 1, QueueSize: 4})
 	pool.Start(context.Background())
 
 	if err := pool.Stop(context.Background()); err != nil {
@@ -124,7 +124,7 @@ func TestPoolRejectsEnqueueAfterStop(t *testing.T) {
 }
 
 func TestPoolStopIsIdempotent(t *testing.T) {
-	pool := NewPool(&countingProcessor{}, testLogger(), Config{Concurrency: 2})
+	pool := NewPool(&countingProcessor{}, nil, testLogger(), Config{Concurrency: 2})
 	pool.Start(context.Background())
 
 	for i := 0; i < 2; i++ {
@@ -137,7 +137,7 @@ func TestPoolStopIsIdempotent(t *testing.T) {
 // Остановка должна прерывать текущую обработку, а не ждать её конца.
 func TestPoolStopInterruptsInFlightTask(t *testing.T) {
 	processor := &countingProcessor{delay: 5 * time.Second}
-	pool := NewPool(processor, testLogger(), Config{Concurrency: 1, QueueSize: 1})
+	pool := NewPool(processor, nil, testLogger(), Config{Concurrency: 1, QueueSize: 1})
 	pool.Start(context.Background())
 
 	if err := pool.Enqueue(uuid.New()); err != nil {
@@ -197,4 +197,56 @@ func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
 	}
 
 	t.Fatalf("условие не выполнено за %s", timeout)
+}
+
+// fakeRecoveryStore отдаёт заранее заданный список незавершённых задач.
+type fakeRecoveryStore struct {
+	ids   []uuid.UUID
+	err   error
+	limit int
+}
+
+func (f *fakeRecoveryStore) RecoverPending(_ context.Context, limit int) ([]uuid.UUID, error) {
+	f.limit = limit
+	return f.ids, f.err
+}
+
+func TestPoolRecoverEnqueuesPendingTasks(t *testing.T) {
+	processor := &countingProcessor{}
+	store := &fakeRecoveryStore{ids: []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}}
+
+	pool := NewPool(processor, store, testLogger(), Config{Concurrency: 2, QueueSize: 8})
+	pool.Start(context.Background())
+	defer func() {
+		if err := pool.Stop(context.Background()); err != nil {
+			t.Errorf("Stop(): %v", err)
+		}
+	}()
+
+	if err := pool.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover(): %v", err)
+	}
+
+	waitFor(t, 5*time.Second, func() bool { return processor.handled.Load() == 3 })
+
+	if store.limit != 8 {
+		t.Errorf("предел восстановления = %d, ожидался размер очереди 8", store.limit)
+	}
+}
+
+func TestPoolRecoverWithoutStoreIsNoop(t *testing.T) {
+	pool := NewPool(&countingProcessor{}, nil, testLogger(), Config{})
+
+	if err := pool.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover() без хранилища вернул ошибку: %v", err)
+	}
+}
+
+func TestPoolRecoverPropagatesStoreError(t *testing.T) {
+	store := &fakeRecoveryStore{err: errors.New("база недоступна")}
+	pool := NewPool(&countingProcessor{}, store, testLogger(), Config{})
+
+	if err := pool.Recover(context.Background()); err == nil {
+		t.Fatal("ожидалась ошибка восстановления")
+	}
 }
