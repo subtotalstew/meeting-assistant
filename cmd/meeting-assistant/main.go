@@ -2,8 +2,7 @@
 //
 // Здесь только сборка зависимостей и управление жизненным циклом процесса:
 // конфигурация, логгер, подключение к базе, миграции, выбор реализаций внешних
-// клиентов, запуск фоновых обработчиков и корректное завершение. Бизнес-логики
-// в этом файле нет.
+// клиентов, запуск CLI и корректное завершение. Бизнес-логики в этом файле нет.
 package main
 
 import (
@@ -14,10 +13,12 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/subtotalstew/meeting-assistant/internal/cli"
 	"github.com/subtotalstew/meeting-assistant/internal/client/llm"
 	"github.com/subtotalstew/meeting-assistant/internal/client/speech"
 	"github.com/subtotalstew/meeting-assistant/internal/config"
 	"github.com/subtotalstew/meeting-assistant/internal/logging"
+	"github.com/subtotalstew/meeting-assistant/internal/service"
 	"github.com/subtotalstew/meeting-assistant/internal/storage/postgres"
 	"github.com/subtotalstew/meeting-assistant/internal/worker"
 )
@@ -74,55 +75,43 @@ func run() error {
 		return err
 	}
 
-	workerLogger := logging.WithComponent(logger, "worker")
+	processor := worker.NewProcessor(store, speechClient, llmClient,
+		logging.WithComponent(logger, "worker"), worker.ProcessorConfig{
+			TaskTimeout:   cfg.Worker.TaskTimeout,
+			SpeechTimeout: cfg.Speech.Timeout,
+			LLMTimeout:    cfg.LLM.Timeout,
+		})
 
-	processor := worker.NewProcessor(store, speechClient, llmClient, workerLogger, worker.ProcessorConfig{
-		TaskTimeout:   cfg.Worker.TaskTimeout,
-		SpeechTimeout: cfg.Speech.Timeout,
-		LLMTimeout:    cfg.LLM.Timeout,
-	})
-
-	pool := worker.NewPool(processor, store, workerLogger, worker.Config{
+	pool := worker.NewPool(processor, store, logging.WithComponent(logger, "worker"), worker.Config{
 		Concurrency: cfg.Worker.Concurrency,
 		QueueSize:   cfg.Worker.QueueSize,
 	})
-	pool.Start(ctx)
 
-	// Восстановление прерванных задач выполняется до приёма новых команд,
-	// иначе встреча, прерванная прошлым запуском, останется в processing.
-	if err := pool.Recover(ctx); err != nil {
-		logger.Warn("не удалось восстановить незавершённые задачи", slog.String("error", err.Error()))
-	}
+	// Пул не запускается здесь: его запускают команды, которым нужна обработка
+	// (load, serve). Остальным командам фоновые воркеры не нужны.
+	svc := service.New(store, speechClient, llmClient, pool,
+		logging.WithComponent(logger, "service"), service.DefaultOptions())
 
-	logger.Info("приложение запущено",
-		slog.String("version", version),
-		slog.Int("workers", cfg.Worker.Concurrency),
-		slog.String("speech_provider", cfg.Speech.Provider),
-		slog.String("llm_provider", cfg.LLM.Provider),
-	)
+	logger.Debug("запуск CLI", slog.String("version", version))
 
-	// Следующая веха добавляет сюда CLI.
-	<-ctx.Done()
+	cmdErr := cli.Execute(ctx, svc, pool, os.Args[1:], os.Stdout, os.Stderr)
 
-	// Возвращаем стандартную реакцию на сигналы: второй Ctrl+C завершит процесс сразу.
-	stop()
-	logger.Info("получен сигнал завершения, останавливаемся")
-
+	// Останавливаем фоновую обработку, если её запускала команда, и только после
+	// этого закрываем базу: воркеры не должны увидеть закрытое соединение.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 
 	if err := shutdown(shutdownCtx, pool); err != nil {
-		return fmt.Errorf("завершение работы: %w", err)
+		return err
 	}
 
-	logger.Info("приложение остановлено")
-	return nil
+	return cmdErr
 }
 
 // shutdown останавливает фоновую обработку.
 //
-// Пул соединений закрывается отдельно и позже: воркеры не должны увидеть закрытую
-// базу. Порядок задан явно, потому что defer выполнится уже после этой функции.
+// Пул соединений закрывается отдельно и позже, уже через defer: порядок задан явно,
+// потому что defer выполнится только после возврата из этой функции.
 func shutdown(ctx context.Context, pool *worker.Pool) error {
 	if err := pool.Stop(ctx); err != nil {
 		return fmt.Errorf("остановка пула обработчиков: %w", err)
