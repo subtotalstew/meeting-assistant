@@ -25,6 +25,8 @@ type fakeService struct {
 	summaryFunc       func(ctx context.Context, userID, meetingID uuid.UUID) (domain.Summary, error)
 	searchFunc        func(ctx context.Context, userID uuid.UUID, query string) ([]domain.SearchHit, error)
 	askFunc           func(ctx context.Context, userID, meetingID uuid.UUID, question string) (string, error)
+	retryFunc         func(ctx context.Context, userID, meetingID uuid.UUID) (domain.Meeting, error)
+	deleteMeetingFunc func(ctx context.Context, userID, meetingID uuid.UUID) error
 }
 
 func (f *fakeService) EnsureUser(ctx context.Context, externalID string) (domain.User, error) {
@@ -269,4 +271,18 @@ func TestFormatHelpers(t *testing.T) {
 	if got := truncateText(strings.Repeat("я", 10), 5); got != "яяяяя…" {
 		t.Errorf("truncateText() = %q", got)
 	}
+}
+
+func (f *fakeService) Retry(ctx context.Context, userID, meetingID uuid.UUID) (domain.Meeting, error) {
+	if f.retryFunc == nil {
+		return domain.Meeting{}, errors.New("Retry не ожидался в этом тесте")
+	}
+	return f.retryFunc(ctx, userID, meetingID)
+}
+
+func (f *fakeService) DeleteMeeting(ctx context.Context, userID, meetingID uuid.UUID) error {
+	if f.deleteMeetingFunc == nil {
+		return errors.New("DeleteMeeting не ожидался в этом тесте")
+	}
+	return f.deleteMeetingFunc(ctx, userID, meetingID)
 }

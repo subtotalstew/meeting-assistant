@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -398,5 +400,108 @@ func TestChatJSONOutput(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "\"answer\": \"ответ\"") {
 		t.Errorf("JSON не содержит ответ: %q", stdout)
+	}
+}
+
+func TestRetryResubmitsMeeting(t *testing.T) {
+	fastPolling(t)
+
+	meetingID := uuid.New()
+	retried := false
+
+	svc := userStub(t)
+	svc.retryFunc = func(context.Context, uuid.UUID, uuid.UUID) (domain.Meeting, error) {
+		retried = true
+		return domain.Meeting{ID: meetingID, Status: domain.StatusCreated}, nil
+	}
+	svc.statusFunc = func(context.Context, uuid.UUID, uuid.UUID) (service.MeetingStatus, error) {
+		return service.MeetingStatus{
+			Meeting: domain.Meeting{ID: meetingID, Status: domain.StatusCompleted},
+			Task:    domain.Task{Status: domain.StatusCompleted},
+		}, nil
+	}
+
+	stdout, _, err := run(t, svc, &fakeWorker{}, "retry", meetingID.String(), "--user", "alice", "--wait-timeout", "2s")
+	if err != nil {
+		t.Fatalf("retry вернул ошибку: %v", err)
+	}
+	if !retried {
+		t.Error("повтор не запрошен у сервиса")
+	}
+	if !strings.Contains(stdout, "completed") {
+		t.Errorf("в выводе нет итогового статуса: %q", stdout)
+	}
+}
+
+func TestRetryNoWait(t *testing.T) {
+	meetingID := uuid.New()
+
+	svc := userStub(t)
+	svc.retryFunc = func(context.Context, uuid.UUID, uuid.UUID) (domain.Meeting, error) {
+		return domain.Meeting{ID: meetingID, Status: domain.StatusCreated}, nil
+	}
+
+	worker := &fakeWorker{}
+	stdout, _, err := run(t, svc, worker, "retry", meetingID.String(), "--user", "alice", "--no-wait")
+	if err != nil {
+		t.Fatalf("retry вернул ошибку: %v", err)
+	}
+	if started, _ := worker.state(); started {
+		t.Error("с --no-wait пул запускать не нужно")
+	}
+	if !strings.Contains(stdout, "created") {
+		t.Errorf("в выводе нет статуса: %q", stdout)
+	}
+}
+
+func TestDeleteRemovesMeeting(t *testing.T) {
+	meetingID := uuid.New()
+	deleted := false
+
+	svc := userStub(t)
+	svc.deleteMeetingFunc = func(_ context.Context, _ uuid.UUID, gotID uuid.UUID) error {
+		if gotID != meetingID {
+			t.Errorf("удалена встреча %s, ожидалась %s", gotID, meetingID)
+		}
+		deleted = true
+		return nil
+	}
+
+	stdout, _, err := run(t, svc, &fakeWorker{}, "delete", meetingID.String(), "--user", "alice")
+	if err != nil {
+		t.Fatalf("delete вернул ошибку: %v", err)
+	}
+	if !deleted {
+		t.Error("удаление не выполнено")
+	}
+	if !strings.Contains(stdout, "встреча удалена") {
+		t.Errorf("нет подтверждения удаления: %q", stdout)
+	}
+}
+
+func TestExportWritesTranscription(t *testing.T) {
+	meetingID := uuid.New()
+
+	svc := userStub(t)
+	svc.transcriptionFunc = func(context.Context, uuid.UUID, uuid.UUID) (domain.Transcription, error) {
+		return domain.Transcription{MeetingID: meetingID, Text: "текст встречи"}, nil
+	}
+
+	target := filepath.Join(t.TempDir(), "out.txt")
+
+	stdout, _, err := run(t, svc, &fakeWorker{}, "export", meetingID.String(), "--user", "alice", "--out", target)
+	if err != nil {
+		t.Fatalf("export вернул ошибку: %v", err)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("файл не создан: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "текст встречи" {
+		t.Errorf("в файле %q", string(data))
+	}
+	if !strings.Contains(stdout, "транскрипция сохранена") {
+		t.Errorf("нет подтверждения: %q", stdout)
 	}
 }

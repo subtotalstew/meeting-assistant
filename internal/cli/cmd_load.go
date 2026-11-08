@@ -114,16 +114,19 @@ func (a *App) waitForCompletion(ctx context.Context, userID, meetingID uuid.UUID
 	}
 }
 
+// finalState сводит встречу и её актуальный статус к состоянию для вывода.
+func finalState(meeting domain.Meeting, status *service.MeetingStatus) (domain.Status, string) {
+	if status == nil {
+		return meeting.Status, meeting.Error
+	}
+	return status.Meeting.Status, status.ErrorMessage()
+}
+
 // printLoaded выводит результат загрузки.
 func (a *App) printLoaded(meeting domain.Meeting, status *service.MeetingStatus) error {
 	out := a.printer()
 
-	finalStatus := meeting.Status
-	errText := ""
-	if status != nil {
-		finalStatus = status.Meeting.Status
-		errText = status.ErrorMessage()
-	}
+	finalStatus, errText := finalState(meeting, status)
 
 	if out.json {
 		payload := map[string]any{
