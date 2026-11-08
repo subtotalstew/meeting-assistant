@@ -22,6 +22,9 @@ var envKeys = []string{
 	"SPEECH_TIMEOUT",
 	"LLM_PROVIDER",
 	"LLM_TIMEOUT",
+	"WORKER_CONCURRENCY",
+	"WORKER_QUEUE_SIZE",
+	"TASK_TIMEOUT",
 }
 
 func resetEnv(t *testing.T) {
@@ -72,6 +75,15 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.LLM.Timeout != defaultLLMTimeout {
 		t.Errorf("LLM.Timeout = %s, ожидалось %s", cfg.LLM.Timeout, defaultLLMTimeout)
 	}
+	if cfg.Worker.Concurrency != defaultConcurrency {
+		t.Errorf("Worker.Concurrency = %d, ожидалось %d", cfg.Worker.Concurrency, defaultConcurrency)
+	}
+	if cfg.Worker.QueueSize != defaultQueueSize {
+		t.Errorf("Worker.QueueSize = %d, ожидалось %d", cfg.Worker.QueueSize, defaultQueueSize)
+	}
+	if cfg.Worker.TaskTimeout != defaultTaskTimeout {
+		t.Errorf("Worker.TaskTimeout = %s, ожидалось %s", cfg.Worker.TaskTimeout, defaultTaskTimeout)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -87,6 +99,9 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("SPEECH_TIMEOUT", "30s")
 	t.Setenv("LLM_PROVIDER", "gigachat")
 	t.Setenv("LLM_TIMEOUT", "2m")
+	t.Setenv("WORKER_CONCURRENCY", "7")
+	t.Setenv("WORKER_QUEUE_SIZE", "128")
+	t.Setenv("TASK_TIMEOUT", "5m")
 
 	cfg, err := Load()
 	if err != nil {
@@ -127,6 +142,15 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.LLM.Timeout != 2*time.Minute {
 		t.Errorf("LLM.Timeout = %s, ожидалось 2m", cfg.LLM.Timeout)
 	}
+	if cfg.Worker.Concurrency != 7 {
+		t.Errorf("Worker.Concurrency = %d, ожидалось 7", cfg.Worker.Concurrency)
+	}
+	if cfg.Worker.QueueSize != 128 {
+		t.Errorf("Worker.QueueSize = %d, ожидалось 128", cfg.Worker.QueueSize)
+	}
+	if cfg.Worker.TaskTimeout != 5*time.Minute {
+		t.Errorf("Worker.TaskTimeout = %s, ожидалось 5m", cfg.Worker.TaskTimeout)
+	}
 }
 
 func TestLoadInvalid(t *testing.T) {
@@ -147,6 +171,10 @@ func TestLoadInvalid(t *testing.T) {
 		{name: "неизвестный speech-провайдер", key: "SPEECH_PROVIDER", value: "salute"},
 		{name: "неизвестный LLM-провайдер", key: "LLM_PROVIDER", value: "openai"},
 		{name: "таймаут speech без единиц", key: "SPEECH_TIMEOUT", value: "60"},
+		{name: "ноль обработчиков", key: "WORKER_CONCURRENCY", value: "0"},
+		{name: "слишком много обработчиков", key: "WORKER_CONCURRENCY", value: "500"},
+		{name: "нулевая очередь", key: "WORKER_QUEUE_SIZE", value: "0"},
+		{name: "таймаут задачи без единиц", key: "TASK_TIMEOUT", value: "600"},
 	}
 
 	for _, tc := range cases {

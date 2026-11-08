@@ -1,8 +1,9 @@
 // Command meeting-assistant — «Умный помощник для конспектирования встреч».
 //
 // Здесь только сборка зависимостей и управление жизненным циклом процесса:
-// конфигурация, логгер, подключение к базе, миграции, обработка сигналов завершения.
-// Бизнес-логики в этом файле нет.
+// конфигурация, логгер, подключение к базе, миграции, выбор реализаций внешних
+// клиентов, запуск фоновых обработчиков и корректное завершение. Бизнес-логики
+// в этом файле нет.
 package main
 
 import (
@@ -13,9 +14,12 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/subtotalstew/meeting-assistant/internal/client/llm"
+	"github.com/subtotalstew/meeting-assistant/internal/client/speech"
 	"github.com/subtotalstew/meeting-assistant/internal/config"
 	"github.com/subtotalstew/meeting-assistant/internal/logging"
 	"github.com/subtotalstew/meeting-assistant/internal/storage/postgres"
+	"github.com/subtotalstew/meeting-assistant/internal/worker"
 )
 
 // version подставляется линкером: -ldflags "-X main.version=1.0.0".
@@ -38,8 +42,8 @@ func run() error {
 	logger := logging.New(cfg.Logger)
 	slog.SetDefault(logger)
 
-	// NotifyContext отменяет контекст по Ctrl+C и по SIGTERM — это единственная
-	// точка, из которой сигнал завершения растекается по всем слоям.
+	// NotifyContext отменяет контекст по Ctrl+C и по SIGTERM — единственная точка,
+	// из которой сигнал завершения растекается по всем слоям.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -59,9 +63,45 @@ func run() error {
 		logger.Info("схема базы данных актуальна")
 	}
 
-	logger.Info("приложение запущено", slog.String("version", version))
+	// Реализации внешних клиентов выбираются по конфигурации: ни обработчик,
+	// ни бизнес-логика про конкретного провайдера не знают.
+	speechClient, err := newSpeechClient(cfg)
+	if err != nil {
+		return err
+	}
+	llmClient, err := newLLMClient(cfg)
+	if err != nil {
+		return err
+	}
 
-	// Следующие вехи добавляют сюда пул воркеров и CLI.
+	workerLogger := logging.WithComponent(logger, "worker")
+
+	processor := worker.NewProcessor(store, speechClient, llmClient, workerLogger, worker.ProcessorConfig{
+		TaskTimeout:   cfg.Worker.TaskTimeout,
+		SpeechTimeout: cfg.Speech.Timeout,
+		LLMTimeout:    cfg.LLM.Timeout,
+	})
+
+	pool := worker.NewPool(processor, store, workerLogger, worker.Config{
+		Concurrency: cfg.Worker.Concurrency,
+		QueueSize:   cfg.Worker.QueueSize,
+	})
+	pool.Start(ctx)
+
+	// Восстановление прерванных задач выполняется до приёма новых команд,
+	// иначе встреча, прерванная прошлым запуском, останется в processing.
+	if err := pool.Recover(ctx); err != nil {
+		logger.Warn("не удалось восстановить незавершённые задачи", slog.String("error", err.Error()))
+	}
+
+	logger.Info("приложение запущено",
+		slog.String("version", version),
+		slog.Int("workers", cfg.Worker.Concurrency),
+		slog.String("speech_provider", cfg.Speech.Provider),
+		slog.String("llm_provider", cfg.LLM.Provider),
+	)
+
+	// Следующая веха добавляет сюда CLI.
 	<-ctx.Done()
 
 	// Возвращаем стандартную реакцию на сигналы: второй Ctrl+C завершит процесс сразу.
@@ -71,7 +111,7 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 
-	if err := shutdown(shutdownCtx); err != nil {
+	if err := shutdown(shutdownCtx, pool); err != nil {
 		return fmt.Errorf("завершение работы: %w", err)
 	}
 
@@ -79,9 +119,39 @@ func run() error {
 	return nil
 }
 
-// shutdown останавливает фоновые обработчики и дожидается их завершения.
-// Появится на вехе worker; пул соединений закрывается отдельно, после этого шага.
-func shutdown(ctx context.Context) error {
-	_ = ctx
+// shutdown останавливает фоновую обработку.
+//
+// Пул соединений закрывается отдельно и позже: воркеры не должны увидеть закрытую
+// базу. Порядок задан явно, потому что defer выполнится уже после этой функции.
+func shutdown(ctx context.Context, pool *worker.Pool) error {
+	if err := pool.Stop(ctx); err != nil {
+		return fmt.Errorf("остановка пула обработчиков: %w", err)
+	}
 	return nil
+}
+
+// newSpeechClient выбирает реализацию speech-клиента по конфигурации.
+func newSpeechClient(cfg config.Config) (speech.Client, error) {
+	switch cfg.Speech.Provider {
+	case config.ProviderMock:
+		return speech.NewMock(), nil
+	default:
+		return nil, fmt.Errorf(
+			"speech-провайдер %q пока не подключён: используйте SPEECH_PROVIDER=%s",
+			cfg.Speech.Provider, config.ProviderMock,
+		)
+	}
+}
+
+// newLLMClient выбирает реализацию LLM-клиента по конфигурации.
+func newLLMClient(cfg config.Config) (llm.Client, error) {
+	switch cfg.LLM.Provider {
+	case config.ProviderMock:
+		return llm.NewMock(), nil
+	default:
+		return nil, fmt.Errorf(
+			"LLM-провайдер %q пока не подключён: используйте LLM_PROVIDER=%s",
+			cfg.LLM.Provider, config.ProviderMock,
+		)
+	}
 }

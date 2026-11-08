@@ -41,6 +41,9 @@ const (
 	defaultShutdownTimeout = 15 * time.Second
 	defaultSpeechTimeout   = 60 * time.Second
 	defaultLLMTimeout      = 90 * time.Second
+	defaultConcurrency     = 4
+	defaultQueueSize       = 64
+	defaultTaskTimeout     = 10 * time.Minute
 )
 
 // Config — полная конфигурация приложения.
@@ -49,8 +52,20 @@ type Config struct {
 	Logger          Logger
 	Speech          Client
 	LLM             Client
+	Worker          Worker
 	ShutdownTimeout time.Duration
 	AutoMigrate     bool
+}
+
+// Worker — настройки фоновой обработки.
+type Worker struct {
+	// Concurrency — сколько встреч обрабатывается одновременно.
+	// Это же значение ограничивает число горутин обработки.
+	Concurrency int
+	// QueueSize — размер буфера очереди задач.
+	QueueSize int
+	// TaskTimeout — предел на весь цикл обработки одной встречи.
+	TaskTimeout time.Duration
 }
 
 // Client — настройки внешнего клиента (speech или LLM).
@@ -96,6 +111,11 @@ func Load() (Config, error) {
 		LLM: Client{
 			Provider: l.oneOf("LLM_PROVIDER", ProviderMock, ProviderMock, ProviderGigaChat),
 			Timeout:  l.durationInRange("LLM_TIMEOUT", defaultLLMTimeout, time.Second, 10*time.Minute),
+		},
+		Worker: Worker{
+			Concurrency: l.intInRange("WORKER_CONCURRENCY", defaultConcurrency, 1, 64),
+			QueueSize:   l.intInRange("WORKER_QUEUE_SIZE", defaultQueueSize, 1, 10000),
+			TaskTimeout: l.durationInRange("TASK_TIMEOUT", defaultTaskTimeout, time.Second, time.Hour),
 		},
 		ShutdownTimeout: l.durationInRange("SHUTDOWN_TIMEOUT", defaultShutdownTimeout, time.Second, 5*time.Minute),
 		AutoMigrate:     l.boolValue("AUTO_MIGRATE", true),

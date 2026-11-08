@@ -107,7 +107,7 @@ func (f *fakeStore) statusSequence() []domain.Status {
 
 func newTestProcessor(store Store, speechClient speech.Client, llmClient llm.Client, timeout time.Duration) *Processor {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewProcessor(store, speechClient, llmClient, logger, timeout)
+	return NewProcessor(store, speechClient, llmClient, logger, ProcessorConfig{TaskTimeout: timeout})
 }
 
 func testMeeting() domain.Meeting {
@@ -320,5 +320,35 @@ func TestHumanizeErrorTruncatesLongMessage(t *testing.T) {
 	got := humanizeError(long)
 	if len([]rune(got)) > maxErrorRunes+1 {
 		t.Errorf("длина текста ошибки = %d, предел %d", len([]rune(got)), maxErrorRunes)
+	}
+}
+
+// Таймаут отдельного вызова клиента должен срабатывать раньше общего таймаута задачи
+// и попадать в failed тем же понятным текстом.
+func TestProcessSpeechCallTimeout(t *testing.T) {
+	meeting := testMeeting()
+	store := &fakeStore{meeting: meeting}
+
+	slowSpeech := &speech.Mock{Delay: 2 * time.Second, Default: "текст"}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	processor := NewProcessor(store, slowSpeech, llm.NewMock(), logger, ProcessorConfig{
+		TaskTimeout:   time.Minute,
+		SpeechTimeout: 30 * time.Millisecond,
+	})
+
+	start := time.Now()
+	if err := processor.Process(context.Background(), meeting.ID); err == nil {
+		t.Fatal("ожидалась ошибка по таймауту вызова")
+	}
+
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("таймаут вызова не сработал: %s", elapsed)
+	}
+	if !store.savedFailure {
+		t.Fatal("задача обязана перейти в failed")
+	}
+	if store.failureReason != "внешний сервис не ответил вовремя" {
+		t.Errorf("текст ошибки = %q", store.failureReason)
 	}
 }

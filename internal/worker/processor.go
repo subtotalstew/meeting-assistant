@@ -41,31 +41,42 @@ type Store interface {
 
 // Processor выполняет полный цикл обработки одной встречи.
 type Processor struct {
-	store       Store
-	speech      speech.Client
-	llm         llm.Client
-	log         *slog.Logger
-	taskTimeout time.Duration
+	store  Store
+	speech speech.Client
+	llm    llm.Client
+	log    *slog.Logger
+	config ProcessorConfig
+}
+
+// ProcessorConfig — настройки обработчика.
+type ProcessorConfig struct {
+	// TaskTimeout ограничивает весь цикл обработки одной встречи.
+	TaskTimeout time.Duration
+	// SpeechTimeout ограничивает один вызов speech-клиента.
+	SpeechTimeout time.Duration
+	// LLMTimeout ограничивает один вызов LLM-клиента.
+	LLMTimeout time.Duration
 }
 
 // NewProcessor создаёт обработчик.
 //
-// taskTimeout ограничивает весь цикл целиком, а не отдельные вызовы: распознавание
-// и выжимка вместе не должны держать задачу в работе бесконечно.
-func NewProcessor(store Store, speechClient speech.Client, llmClient llm.Client, logger *slog.Logger, taskTimeout time.Duration) *Processor {
+// Таймауты двух уровней: TaskTimeout ограничивает цикл целиком, таймауты клиентов —
+// каждый отдельный вызов. Так зависший внешний сервис не съедает весь бюджет задачи,
+// и в тексте ошибки видно, какой именно вызов не уложился.
+func NewProcessor(store Store, speechClient speech.Client, llmClient llm.Client, logger *slog.Logger, cfg ProcessorConfig) *Processor {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if taskTimeout <= 0 {
-		taskTimeout = 10 * time.Minute
+	if cfg.TaskTimeout <= 0 {
+		cfg.TaskTimeout = 10 * time.Minute
 	}
 
 	return &Processor{
-		store:       store,
-		speech:      speechClient,
-		llm:         llmClient,
-		log:         logger,
-		taskTimeout: taskTimeout,
+		store:  store,
+		speech: speechClient,
+		llm:    llmClient,
+		log:    logger,
+		config: cfg,
 	}
 }
 
@@ -74,7 +85,7 @@ func NewProcessor(store Store, speechClient speech.Client, llmClient llm.Client,
 // При любой ошибке задача переводится в failed с понятным пользователю текстом,
 // поэтому status <id> всегда показывает причину, а не «висит в processing».
 func (p *Processor) Process(ctx context.Context, meetingID uuid.UUID) error {
-	taskCtx, cancel := context.WithTimeout(ctx, p.taskTimeout)
+	taskCtx, cancel := context.WithTimeout(ctx, p.config.TaskTimeout)
 	defer cancel()
 
 	meeting, err := p.store.GetMeetingByID(taskCtx, meetingID)
@@ -124,7 +135,14 @@ func (p *Processor) transcribe(ctx context.Context, meeting domain.Meeting) (dom
 		"provider", p.speech.Provider(),
 	)
 
-	result, err := p.speech.Transcribe(ctx, speech.Request{
+	callCtx := ctx
+	if p.config.SpeechTimeout > 0 {
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithTimeout(ctx, p.config.SpeechTimeout)
+		defer cancel()
+	}
+
+	result, err := p.speech.Transcribe(callCtx, speech.Request{
 		Path:     meeting.SourcePath,
 		FileName: meeting.FileName,
 	})
@@ -162,7 +180,14 @@ func (p *Processor) summarize(ctx context.Context, meeting domain.Meeting, trans
 		"provider", p.llm.Provider(),
 	)
 
-	result, err := p.llm.Summarize(ctx, llm.SummaryRequest{
+	callCtx := ctx
+	if p.config.LLMTimeout > 0 {
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithTimeout(ctx, p.config.LLMTimeout)
+		defer cancel()
+	}
+
+	result, err := p.llm.Summarize(callCtx, llm.SummaryRequest{
 		MeetingTitle: meeting.Title,
 		Transcript:   transcript,
 	})
