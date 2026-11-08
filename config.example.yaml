@@ -1,0 +1,48 @@
+# Пример конфигурации meeting-assistant.
+#
+# Использование:
+#   CONFIG_FILE=config.example.yaml ./bin/meeting-assistant list --user alice
+#
+# Порядок применения: значения по умолчанию -> этот файл -> переменные окружения.
+# Любая переменная окружения перекрывает значение из файла.
+
+database:
+  # Строка подключения. Пароль не попадает в логи и сообщения об ошибках.
+  dsn: postgres://meeting:meeting@localhost:5432/meeting?sslmode=disable
+  # Размер пула соединений, 1..200.
+  max_conns: 10
+  # Таймаут подключения, 100ms..1m.
+  conn_timeout: 5s
+
+logging:
+  # debug | info | warn | error
+  level: info
+  # json | text
+  format: json
+
+speech:
+  # mock | yandex (yandex пока не реализован)
+  provider: mock
+  # Таймаут одного вызова распознавания, 1s..10m.
+  timeout: 60s
+
+llm:
+  # mock | gigachat (gigachat пока не реализован)
+  provider: mock
+  # Таймаут одного вызова модели, 1s..10m.
+  timeout: 90s
+
+worker:
+  # Сколько встреч обрабатывается одновременно, 1..64.
+  # Это же число ограничивает количество горутин обработки.
+  concurrency: 4
+  # Размер буфера очереди задач, 1..10000.
+  queue_size: 64
+  # Предел на весь цикл обработки одной встречи, 1s..1h.
+  task_timeout: 10m
+
+# Сколько ждём корректного завершения при остановке, 1s..5m.
+shutdown_timeout: 15s
+
+# Накатывать миграции при старте приложения.
+auto_migrate: true

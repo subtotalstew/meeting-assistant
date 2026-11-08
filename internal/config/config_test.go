@@ -25,6 +25,7 @@ var envKeys = []string{
 	"WORKER_CONCURRENCY",
 	"WORKER_QUEUE_SIZE",
 	"TASK_TIMEOUT",
+	"CONFIG_FILE",
 }
 
 func resetEnv(t *testing.T) {
