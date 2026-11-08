@@ -14,6 +14,18 @@ import (
 // ProviderMock — имя тестового провайдера в конфигурации и в базе.
 const ProviderMock = "mock"
 
+// failureMarker — часть имени файла, включающая имитацию сбоя распознавания.
+const failureMarker = "fail"
+
+// failureInjected сообщает, нужно ли сымитировать сбой для этого запроса.
+func failureInjected(req Request) bool {
+	name := strings.ToLower(req.FileName)
+	if name == "" {
+		name = strings.ToLower(filepath.Base(req.Path))
+	}
+	return strings.Contains(name, failureMarker)
+}
+
 // DefaultTranscript — транскрипция по умолчанию.
 //
 // Нужна, чтобы демонстрация и тесты не зависели от файлов на диске: загрузили
@@ -78,6 +90,14 @@ func (m *Mock) Transcribe(ctx context.Context, req Request) (Result, error) {
 
 	if m.Err != nil {
 		return Result{}, client.New(ProviderMock, "transcribe", client.ErrUnavailable, m.Err)
+	}
+
+	// Имитация сбоя распознавания. Нужна, чтобы показать обработку ошибки и команду
+	// retry без реального сервиса: срабатывает детерминированно на файлах,
+	// в имени которых есть "fail".
+	if failureInjected(req) {
+		return Result{}, client.New(ProviderMock, "transcribe", client.ErrUnavailable,
+			fmt.Errorf("имитация сбоя распознавания: имя файла содержит %q", failureMarker))
 	}
 
 	text, err := m.transcript(req)

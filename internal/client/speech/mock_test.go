@@ -114,3 +114,21 @@ func TestMockTranscribeUsesRequestedLanguage(t *testing.T) {
 		t.Errorf("Language = %q, ожидался en-US", result.Language)
 	}
 }
+
+// Имитация сбоя нужна для демонстрации обработки ошибки и команды retry.
+func TestMockTranscribeFailureInjectedByName(t *testing.T) {
+	mock := NewMock()
+
+	_, err := mock.Transcribe(context.Background(), Request{Path: "/tmp/fail-meeting.ogg", FileName: "fail-meeting.ogg"})
+	if !errors.Is(err, client.ErrUnavailable) {
+		t.Fatalf("ожидалась ErrUnavailable, получено: %v", err)
+	}
+	if !strings.Contains(err.Error(), "имитация") {
+		t.Errorf("ошибка не сообщает об имитации: %v", err)
+	}
+
+	// Обычное имя файла обрабатывается нормально.
+	if _, err := mock.Transcribe(context.Background(), Request{Path: "/tmp/meeting.ogg", FileName: "meeting.ogg"}); err != nil {
+		t.Fatalf("обычный файл обработан с ошибкой: %v", err)
+	}
+}
