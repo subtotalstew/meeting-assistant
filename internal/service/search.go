@@ -108,3 +108,15 @@ func (s *Service) saveQuestion(ctx context.Context, meetingID, userID uuid.UUID,
 		)
 	}
 }
+
+// Stats возвращает агрегаты по встречам пользователя.
+//
+// Отдельного кэша нет: запросы дешёвые (индексы по user_id), а расхождение
+// с реальностью в диагностике хуже, чем лишний запрос.
+func (s *Service) Stats(ctx context.Context, userID uuid.UUID) (domain.Stats, error) {
+	stats, err := s.repo.Stats(ctx, userID)
+	if err != nil {
+		return domain.Stats{}, fmt.Errorf("статистика: %w", err)
+	}
+	return stats, nil
+}

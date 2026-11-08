@@ -42,6 +42,7 @@ type Service interface {
 	Ask(ctx context.Context, userID, meetingID uuid.UUID, question string) (string, error)
 	Retry(ctx context.Context, userID, meetingID uuid.UUID) (domain.Meeting, error)
 	DeleteMeeting(ctx context.Context, userID, meetingID uuid.UUID) error
+	Stats(ctx context.Context, userID uuid.UUID) (domain.Stats, error)
 }
 
 // Worker — управление фоновой обработкой.

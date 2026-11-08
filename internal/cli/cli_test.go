@@ -27,6 +27,7 @@ type fakeService struct {
 	askFunc           func(ctx context.Context, userID, meetingID uuid.UUID, question string) (string, error)
 	retryFunc         func(ctx context.Context, userID, meetingID uuid.UUID) (domain.Meeting, error)
 	deleteMeetingFunc func(ctx context.Context, userID, meetingID uuid.UUID) error
+	statsFunc         func(ctx context.Context, userID uuid.UUID) (domain.Stats, error)
 }
 
 func (f *fakeService) EnsureUser(ctx context.Context, externalID string) (domain.User, error) {
@@ -285,4 +286,11 @@ func (f *fakeService) DeleteMeeting(ctx context.Context, userID, meetingID uuid.
 		return errors.New("DeleteMeeting не ожидался в этом тесте")
 	}
 	return f.deleteMeetingFunc(ctx, userID, meetingID)
+}
+
+func (f *fakeService) Stats(ctx context.Context, userID uuid.UUID) (domain.Stats, error) {
+	if f.statsFunc == nil {
+		return domain.Stats{}, errors.New("Stats не ожидался в этом тесте")
+	}
+	return f.statsFunc(ctx, userID)
 }

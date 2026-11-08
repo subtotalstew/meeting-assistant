@@ -636,3 +636,79 @@ func TestIntegrationSearchFullTextAndSubstring(t *testing.T) {
 		t.Fatalf("найдено %d встреч по отсутствующему слову", len(hits))
 	}
 }
+
+// Агрегаты считаются в базе и не смешиваются между пользователями.
+func TestIntegrationStats(t *testing.T) {
+	store := storeForTest(t)
+	ctx := context.Background()
+
+	user := createUser(t, store, "petr")
+	other := createUser(t, store, "guest")
+
+	var completedID uuid.UUID
+	for i, name := range []string{"first.ogg", "second.ogg"} {
+		meeting, _ := createMeeting(t, store, user, name)
+		if i == 0 {
+			completedID = meeting.ID
+		}
+
+		if _, err := store.StartProcessing(ctx, meeting.ID); err != nil {
+			t.Fatalf("StartProcessing: %v", err)
+		}
+		if err := store.SaveTranscription(ctx, domain.Transcription{
+			MeetingID: meeting.ID, Text: "текст встречи", Provider: "mock", CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("SaveTranscription: %v", err)
+		}
+		if err := store.SaveSummary(ctx, domain.Summary{
+			MeetingID: meeting.ID, Text: "выжимка", Provider: "mock", CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("SaveSummary: %v", err)
+		}
+		if err := store.CompleteProcessing(ctx, meeting.ID); err != nil {
+			t.Fatalf("CompleteProcessing: %v", err)
+		}
+	}
+
+	failed, _ := createMeeting(t, store, user, "broken.ogg")
+	if _, err := store.StartProcessing(ctx, failed.ID); err != nil {
+		t.Fatalf("StartProcessing(failed): %v", err)
+	}
+	if err := store.MarkFailed(ctx, failed.ID, "внешний сервис недоступен"); err != nil {
+		t.Fatalf("MarkFailed: %v", err)
+	}
+
+	// Встреча другого пользователя не должна попасть в статистику.
+	if _, foreign := createMeeting(t, store, other, "foreign.ogg"); foreign.ID == uuid.Nil {
+		t.Fatal("встреча другого пользователя не создана")
+	}
+
+	question, err := domain.NewQuestion(completedID, user.ID, "О чём договорились?", "О релизе.")
+	if err != nil {
+		t.Fatalf("domain.NewQuestion: %v", err)
+	}
+	if err := store.SaveQuestion(ctx, question); err != nil {
+		t.Fatalf("SaveQuestion: %v", err)
+	}
+
+	stats, err := store.Stats(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+
+	if stats.Total != 3 {
+		t.Errorf("всего встреч = %d, ожидалось 3", stats.Total)
+	}
+	if stats.ByStatus[domain.StatusCompleted] != 2 {
+		t.Errorf("completed = %d, ожидалось 2", stats.ByStatus[domain.StatusCompleted])
+	}
+	if stats.ByStatus[domain.StatusFailed] != 1 {
+		t.Errorf("failed = %d, ожидалось 1", stats.ByStatus[domain.StatusFailed])
+	}
+	if stats.Questions != 1 {
+		t.Errorf("вопросов = %d, ожидался 1", stats.Questions)
+	}
+	if stats.AvgProcessing < 0 {
+		t.Errorf("среднее время обработки отрицательное: %s", stats.AvgProcessing)
+	}
+}

@@ -31,6 +31,7 @@ type meetingRepository interface {
 	DeleteMeeting(ctx context.Context, id, userID uuid.UUID) error
 	GetTask(ctx context.Context, meetingID uuid.UUID) (domain.Task, error)
 	ResetForRetry(ctx context.Context, meetingID uuid.UUID) error
+	Stats(ctx context.Context, userID uuid.UUID) (domain.Stats, error)
 }
 
 type documentRepository interface {

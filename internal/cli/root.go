@@ -40,6 +40,7 @@ func (a *App) rootCommand() *cobra.Command {
 		a.retryCommand(),
 		a.deleteCommand(),
 		a.exportCommand(),
+		a.statsCommand(),
 	)
 
 	return root

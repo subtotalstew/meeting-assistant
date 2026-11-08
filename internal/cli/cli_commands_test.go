@@ -505,3 +505,44 @@ func TestExportWritesTranscription(t *testing.T) {
 		t.Errorf("нет подтверждения: %q", stdout)
 	}
 }
+
+func TestStatsRendersTable(t *testing.T) {
+	svc := userStub(t)
+	svc.statsFunc = func(context.Context, uuid.UUID) (domain.Stats, error) {
+		return domain.Stats{
+			Total: 3,
+			ByStatus: map[domain.Status]int{
+				domain.StatusCompleted: 2,
+				domain.StatusFailed:    1,
+			},
+			Questions:     4,
+			AvgProcessing: 1500 * time.Millisecond,
+		}, nil
+	}
+
+	stdout, _, err := run(t, svc, &fakeWorker{}, "stats", "--user", "alice")
+	if err != nil {
+		t.Fatalf("stats вернул ошибку: %v", err)
+	}
+
+	for _, want := range []string{"СТАТУС", "completed", "failed", "всего встреч", "вопросов по встречам", "1.5s"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("в выводе нет %q: %q", want, stdout)
+		}
+	}
+}
+
+func TestStatsEmpty(t *testing.T) {
+	svc := userStub(t)
+	svc.statsFunc = func(context.Context, uuid.UUID) (domain.Stats, error) {
+		return domain.Stats{ByStatus: map[domain.Status]int{}}, nil
+	}
+
+	stdout, _, err := run(t, svc, &fakeWorker{}, "stats", "--user", "alice")
+	if err != nil {
+		t.Fatalf("stats вернул ошибку: %v", err)
+	}
+	if !strings.Contains(stdout, "встреч пока нет") {
+		t.Errorf("нет подсказки для пустой статистики: %q", stdout)
+	}
+}

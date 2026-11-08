@@ -34,6 +34,7 @@ type fakeRepo struct {
 	getSummaryFunc          func(ctx context.Context, meetingID, userID uuid.UUID) (domain.Summary, error)
 	searchMeetingsFunc      func(ctx context.Context, userID uuid.UUID, query string, limit int) ([]domain.SearchHit, error)
 	saveQuestionFunc        func(ctx context.Context, question domain.Question) error
+	statsFunc               func(ctx context.Context, userID uuid.UUID) (domain.Stats, error)
 }
 
 func (f *fakeRepo) GetUserByExternalID(ctx context.Context, externalID string) (domain.User, error) {
@@ -546,5 +547,49 @@ func TestRetryHiddenForForeignMeeting(t *testing.T) {
 		Retry(context.Background(), uuid.New(), uuid.New())
 	if !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("ожидалась ErrNotFound, получено: %v", err)
+	}
+}
+
+func (f *fakeRepo) Stats(ctx context.Context, userID uuid.UUID) (domain.Stats, error) {
+	if f.statsFunc == nil {
+		return domain.Stats{}, errors.New("Stats не ожидался в этом тесте")
+	}
+	return f.statsFunc(ctx, userID)
+}
+
+func TestStatsDelegatesToRepository(t *testing.T) {
+	want := domain.Stats{
+		Total:     2,
+		ByStatus:  map[domain.Status]int{domain.StatusCompleted: 2},
+		Questions: 1,
+	}
+
+	repo := &fakeRepo{
+		statsFunc: func(_ context.Context, userID uuid.UUID) (domain.Stats, error) {
+			if userID == uuid.Nil {
+				t.Error("не передан пользователь")
+			}
+			return want, nil
+		},
+	}
+
+	got, err := newTestService(repo, &fakeQueue{}, DefaultOptions()).Stats(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("Stats() вернул ошибку: %v", err)
+	}
+	if got.Total != want.Total || got.Questions != want.Questions {
+		t.Errorf("Stats() = %+v, ожидалось %+v", got, want)
+	}
+}
+
+func TestStatsWrapsRepositoryError(t *testing.T) {
+	repo := &fakeRepo{
+		statsFunc: func(context.Context, uuid.UUID) (domain.Stats, error) {
+			return domain.Stats{}, errors.New("база недоступна")
+		},
+	}
+
+	if _, err := newTestService(repo, &fakeQueue{}, DefaultOptions()).Stats(context.Background(), uuid.New()); err == nil {
+		t.Fatal("ожидалась ошибка хранилища")
 	}
 }
