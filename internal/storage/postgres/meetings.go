@@ -13,6 +13,9 @@ import (
 const meetingColumns = `
     m.id, m.user_id, m.title, m.file_name, m.status, m.error, m.created_at, m.updated_at`
 
+// summaryPreviewLen — сколько символов выжимки показываем в списке встреч.
+const summaryPreviewLen = 200
+
 const qInsertMeeting = `
 INSERT INTO meetings (id, user_id, title, file_name, status, error, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
@@ -26,12 +29,16 @@ SELECT` + meetingColumns + `
 FROM meetings m
 WHERE m.id = $1 AND m.user_id = $2`
 
-const qListMeetings = `
-SELECT` + meetingColumns + `
+// qListMeetings отдаёт встречи вместе с фрагментом выжимки: LEFT JOIN, потому что
+// у свежей встречи выжимки ещё нет, но из списка её терять нельзя.
+var qListMeetings = fmt.Sprintf(`
+SELECT%[1]s,
+    COALESCE(left(s.text, %[2]d), '') AS summary_preview
 FROM meetings m
+LEFT JOIN summaries s ON s.meeting_id = m.id
 WHERE m.user_id = $1
 ORDER BY m.created_at DESC, m.id DESC
-LIMIT $2`
+LIMIT $2`, meetingColumns, summaryPreviewLen)
 
 const qDeleteMeeting = `
 DELETE FROM meetings WHERE id = $1 AND user_id = $2`
@@ -84,8 +91,8 @@ func (s *Store) GetMeeting(ctx context.Context, id, userID uuid.UUID) (domain.Me
 	return meeting, nil
 }
 
-// ListMeetings возвращает встречи пользователя, новые сверху.
-func (s *Store) ListMeetings(ctx context.Context, userID uuid.UUID, limit int) ([]domain.Meeting, error) {
+// ListMeetings возвращает встречи пользователя вместе с фрагментами выжимок, новые сверху.
+func (s *Store) ListMeetings(ctx context.Context, userID uuid.UUID, limit int) ([]domain.MeetingItem, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -96,13 +103,13 @@ func (s *Store) ListMeetings(ctx context.Context, userID uuid.UUID, limit int) (
 	}
 	defer rows.Close()
 
-	meetings := make([]domain.Meeting, 0, limit)
+	meetings := make([]domain.MeetingItem, 0, limit)
 	for rows.Next() {
-		meeting, err := scanMeeting(rows)
+		item, err := scanMeetingItem(rows)
 		if err != nil {
 			return nil, fmt.Errorf("чтение встречи: %w", err)
 		}
-		meetings = append(meetings, meeting)
+		meetings = append(meetings, item)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("чтение встреч: %w", err)
@@ -143,4 +150,27 @@ func scanMeeting(row rowScanner) (domain.Meeting, error) {
 
 	meeting.Status = domain.Status(status)
 	return meeting, nil
+}
+
+// scanMeetingItem читает встречу вместе с фрагментом выжимки.
+func scanMeetingItem(row rowScanner) (domain.MeetingItem, error) {
+	var item domain.MeetingItem
+	var status string
+
+	if err := row.Scan(
+		&item.ID,
+		&item.UserID,
+		&item.Title,
+		&item.FileName,
+		&status,
+		&item.Error,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+		&item.SummaryPreview,
+	); err != nil {
+		return domain.MeetingItem{}, err
+	}
+
+	item.Status = domain.Status(status)
+	return item, nil
 }
