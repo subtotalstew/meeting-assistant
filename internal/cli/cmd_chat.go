@@ -2,7 +2,6 @@ package cli
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/spf13/cobra"
 )
@@ -48,7 +47,7 @@ func (a *App) chatCommand() *cobra.Command {
 				})
 			}
 
-			fmt.Fprintf(a.stdout, "%s\n", answer)
+			a.printf("%s\n", answer)
 			return nil
 		},
 	}

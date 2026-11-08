@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 
 	"github.com/subtotalstew/meeting-assistant/internal/domain"
@@ -74,11 +72,11 @@ func (a *App) printRetried(meeting domain.Meeting, status *service.MeetingStatus
 		return out.writeJSON(payload)
 	}
 
-	fmt.Fprintf(a.stdout, "встреча поставлена на повтор: %s\n", meeting.ID)
-	fmt.Fprintf(a.stdout, "статус: %s\n", finalStatus)
+	a.printf("встреча поставлена на повтор: %s\n", meeting.ID)
+	a.printf("статус: %s\n", finalStatus)
 
 	if finalStatus == domain.StatusFailed {
-		fmt.Fprintf(a.stdout, "ошибка: %s\n", orEmpty(errText))
+		a.printf("ошибка: %s\n", orEmpty(errText))
 	}
 
 	return nil

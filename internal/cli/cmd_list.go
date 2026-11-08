@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 
 	"github.com/subtotalstew/meeting-assistant/internal/domain"
@@ -47,7 +45,7 @@ func (a *App) listCommand() *cobra.Command {
 			}
 
 			if len(meetings) == 0 {
-				fmt.Fprintln(a.stdout, "встреч пока нет: загрузите файл командой load <path>")
+				a.println("встреч пока нет: загрузите файл командой load <path>")
 				return nil
 			}
 

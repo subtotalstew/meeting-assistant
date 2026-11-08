@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 )
 
@@ -45,7 +43,7 @@ func (a *App) findCommand() *cobra.Command {
 			}
 
 			if len(hits) == 0 {
-				fmt.Fprintf(a.stdout, "по запросу %q ничего не найдено\n", args[0])
+				a.printf("по запросу %q ничего не найдено\n", args[0])
 				return nil
 			}
 

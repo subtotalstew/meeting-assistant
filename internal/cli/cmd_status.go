@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 )
 
@@ -44,15 +42,15 @@ func (a *App) statusCommand() *cobra.Command {
 				})
 			}
 
-			fmt.Fprintf(a.stdout, "встреча:      %s\n", status.Meeting.ID)
-			fmt.Fprintf(a.stdout, "название:     %s\n", orEmpty(status.Meeting.Title))
-			fmt.Fprintf(a.stdout, "статус:       %s\n", status.Meeting.Status)
-			fmt.Fprintf(a.stdout, "создана:      %s\n", formatTime(status.Meeting.CreatedAt))
-			fmt.Fprintf(a.stdout, "изменена:     %s\n", formatTime(status.Meeting.UpdatedAt))
-			fmt.Fprintf(a.stdout, "попыток:      %d\n", status.Task.Attempts)
+			a.printf("встреча:      %s\n", status.Meeting.ID)
+			a.printf("название:     %s\n", orEmpty(status.Meeting.Title))
+			a.printf("статус:       %s\n", status.Meeting.Status)
+			a.printf("создана:      %s\n", formatTime(status.Meeting.CreatedAt))
+			a.printf("изменена:     %s\n", formatTime(status.Meeting.UpdatedAt))
+			a.printf("попыток:      %d\n", status.Task.Attempts)
 
 			if message := status.ErrorMessage(); message != "" {
-				fmt.Fprintf(a.stdout, "ошибка:       %s\n", message)
+				a.printf("ошибка:       %s\n", message)
 			}
 
 			return nil

@@ -44,7 +44,7 @@ func (a *App) statsCommand() *cobra.Command {
 			}
 
 			if stats.Total == 0 {
-				fmt.Fprintln(a.stdout, "встреч пока нет: загрузите файл командой load <path>")
+				a.println("встреч пока нет: загрузите файл командой load <path>")
 				return nil
 			}
 
@@ -57,9 +57,9 @@ func (a *App) statsCommand() *cobra.Command {
 				return err
 			}
 
-			fmt.Fprintf(a.stdout, "\nвсего встреч:          %d\n", stats.Total)
-			fmt.Fprintf(a.stdout, "среднее время:         %s\n", formatDuration(stats.AvgProcessing))
-			fmt.Fprintf(a.stdout, "вопросов по встречам:  %d\n", stats.Questions)
+			a.printf("\nвсего встреч:          %d\n", stats.Total)
+			a.printf("среднее время:         %s\n", formatDuration(stats.AvgProcessing))
+			a.printf("вопросов по встречам:  %d\n", stats.Questions)
 
 			return nil
 		},

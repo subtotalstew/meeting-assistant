@@ -142,19 +142,19 @@ func (a *App) printLoaded(meeting domain.Meeting, status *service.MeetingStatus)
 		return out.writeJSON(payload)
 	}
 
-	fmt.Fprintf(a.stdout, "встреча создана: %s\n", meeting.ID)
-	fmt.Fprintf(a.stdout, "файл: %s\n", meeting.FileName)
-	fmt.Fprintf(a.stdout, "статус: %s\n", finalStatus)
+	a.printf("встреча создана: %s\n", meeting.ID)
+	a.printf("файл: %s\n", meeting.FileName)
+	a.printf("статус: %s\n", finalStatus)
 
 	switch {
 	case a.noWait:
-		fmt.Fprintf(a.stdout, "обработка пойдёт в режиме serve; статус: meeting-assistant status %s --user %s\n",
+		a.printf("обработка пойдёт в режиме serve; статус: meeting-assistant status %s --user %s\n",
 			meeting.ID, a.userID)
 	case finalStatus == domain.StatusFailed:
-		fmt.Fprintf(a.stdout, "ошибка: %s\n", orEmpty(errText))
+		a.printf("ошибка: %s\n", orEmpty(errText))
 	default:
-		fmt.Fprintf(a.stdout, "транскрипция: meeting-assistant get %s --user %s\n", meeting.ID, a.userID)
-		fmt.Fprintf(a.stdout, "выжимка:     meeting-assistant summary %s --user %s\n", meeting.ID, a.userID)
+		a.printf("транскрипция: meeting-assistant get %s --user %s\n", meeting.ID, a.userID)
+		a.printf("выжимка:     meeting-assistant summary %s --user %s\n", meeting.ID, a.userID)
 	}
 
 	return nil

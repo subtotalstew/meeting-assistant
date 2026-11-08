@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 )
 
@@ -30,8 +28,8 @@ func (a *App) startCommand() *cobra.Command {
 				})
 			}
 
-			fmt.Fprintf(a.stdout, "пользователь %s зарегистрирован\n", user.ExternalID)
-			fmt.Fprintf(a.stdout, "идентификатор: %s\n", user.ID)
+			a.printf("пользователь %s зарегистрирован\n", user.ExternalID)
+			a.printf("идентификатор: %s\n", user.ID)
 			return nil
 		},
 	}

@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 )
 
@@ -42,8 +40,8 @@ func (a *App) getCommand() *cobra.Command {
 
 			// В человекочитаемом режиме печатается только текст: так его удобно
 			// перенаправлять в файл и искать глазами, без служебных строк.
-			_, err = fmt.Fprintln(a.stdout, transcription.Text)
-			return err
+			a.println(transcription.Text)
+			return nil
 		},
 	}
 }
@@ -81,8 +79,8 @@ func (a *App) summaryCommand() *cobra.Command {
 				})
 			}
 
-			_, err = fmt.Fprintln(a.stdout, summary.Text)
-			return err
+			a.println(summary.Text)
+			return nil
 		},
 	}
 }

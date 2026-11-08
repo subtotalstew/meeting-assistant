@@ -39,7 +39,7 @@ func (a *App) deleteCommand() *cobra.Command {
 				return out.writeJSON(map[string]string{"deleted": meetingID.String()})
 			}
 
-			fmt.Fprintf(a.stdout, "встреча удалена: %s\n", meetingID)
+			a.printf("встреча удалена: %s\n", meetingID)
 			return nil
 		},
 	}
@@ -95,7 +95,7 @@ func (a *App) exportCommand() *cobra.Command {
 				})
 			}
 
-			fmt.Fprintf(a.stdout, "транскрипция сохранена: %s\n", absolute)
+			a.printf("транскрипция сохранена: %s\n", absolute)
 			return nil
 		},
 	}
