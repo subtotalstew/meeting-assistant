@@ -32,7 +32,7 @@ func (a *App) serveCommand() *cobra.Command {
 			}
 
 			if !a.jsonOutput {
-				fmt.Fprintln(a.stdout, "обработчик запущен, остановите по Ctrl+C")
+				a.println("обработчик запущен, остановите по Ctrl+C")
 			}
 
 			// Ждём сигнала: остановку пула выполняет main, после возврата команды.

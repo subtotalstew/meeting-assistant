@@ -11,15 +11,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/subtotalstew/meeting-assistant/internal/config"
 	"github.com/subtotalstew/meeting-assistant/internal/domain"
 )
-
-// Код ошибки PostgreSQL для нарушения уникальности.
-const pgUniqueViolation = "23505"
 
 // Store — хранилище на PostgreSQL: один пул соединений на процесс.
 type Store struct {
@@ -102,14 +98,6 @@ func (s *Store) withTx(ctx context.Context, fn func(pgx.Tx) error) (err error) {
 	return nil
 }
 
-// querier описывает то, что умеют и пул, и транзакция.
-// Позволяет писать один и тот же код внутри транзакции и вне её.
-type querier interface {
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
 // rowScanner описывает то, что умеют pgx.Row и pgx.Rows — упрощает переиспользование
 // функций сканирования.
 type rowScanner interface {
@@ -124,10 +112,4 @@ func wrapNotFound(err error, what string) error {
 		return fmt.Errorf("%w: %s", domain.ErrNotFound, what)
 	}
 	return err
-}
-
-// isUniqueViolation сообщает, что запрос нарушил уникальный индекс.
-func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
 }

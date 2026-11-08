@@ -24,6 +24,20 @@ type printer struct {
 	json bool
 }
 
+// printf печатает строку в stdout.
+//
+// Ошибку записи намеренно не возвращаем: команда уже выполнена, а обрыв пайпа
+// (например, `| head`) — не повод считать бизнес-операцию неуспешной. Для данных,
+// которые важны вызывающей стороне, есть writeJSON и writeTable с возвратом ошибки.
+func (a *App) printf(format string, args ...any) {
+	_, _ = fmt.Fprintf(a.stdout, format, args...)
+}
+
+// println печатает строку с переводом строки в stdout.
+func (a *App) println(args ...any) {
+	_, _ = fmt.Fprintln(a.stdout, args...)
+}
+
 // writeJSON печатает значение в формате JSON с отступами.
 func (p printer) writeJSON(value any) error {
 	encoder := json.NewEncoder(p.out)
