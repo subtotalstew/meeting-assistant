@@ -1,0 +1,29 @@
+# Бинарники и артефакты сборки.
+bin/
+dist/
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Локальное окружение.
+.env
+.env.local
+*.log
+
+# Медиа для ручных проверок: тестовые аудио не должны весить в репозитории.
+*.ogg
+*.mp3
+*.wav
+*.m4a
+*.opus
+
+# IDE.
+.idea/
+.vscode/
+*.swp
+
+# Временные файлы.
+tmp/
+.cache/
