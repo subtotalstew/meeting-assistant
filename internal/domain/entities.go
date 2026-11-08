@@ -27,14 +27,17 @@ type User struct {
 
 // Meeting — загруженная встреча вместе с текущим статусом обработки.
 type Meeting struct {
-	ID        uuid.UUID
-	UserID    uuid.UUID
-	Title     string
-	FileName  string
-	Status    Status
-	Error     string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID       uuid.UUID
+	UserID   uuid.UUID
+	Title    string
+	FileName string
+	// SourcePath — путь к исходному файлу: по нему фоновый обработчик читает
+	// запись, а повторная попытка может взять тот же файл.
+	SourcePath string
+	Status     Status
+	Error      string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // Task — задача обработки встречи. Отдельная сущность, потому что у неё
@@ -126,13 +129,17 @@ func NewUser(externalID string) (User, error) {
 // Обе сущности возвращаются вместе, потому что в базе они создаются одной
 // транзакцией: встреча без задачи обработки — это потерянная запись,
 // которую пользователь не сможет ни увидеть в работе, ни перезапустить.
-func NewMeeting(userID uuid.UUID, title, fileName string) (Meeting, Task, error) {
+//
+// sourcePath — путь к исходному файлу: из него выводится имя файла и название,
+// если название не задано явно.
+func NewMeeting(userID uuid.UUID, title, sourcePath string) (Meeting, Task, error) {
 	if userID == uuid.Nil {
 		return Meeting{}, Task{}, fmt.Errorf("%w: не указан пользователь", ErrValidation)
 	}
 
-	fileName = strings.TrimSpace(fileName)
-	if fileName == "" {
+	sourcePath = strings.TrimSpace(sourcePath)
+	fileName := filepath.Base(sourcePath)
+	if sourcePath == "" || fileName == "" || fileName == "." {
 		return Meeting{}, Task{}, fmt.Errorf("%w: не указан файл встречи", ErrValidation)
 	}
 	if utf8.RuneCountInString(fileName) > maxFileNameLen {
@@ -158,13 +165,14 @@ func NewMeeting(userID uuid.UUID, title, fileName string) (Meeting, Task, error)
 
 	now := time.Now().UTC()
 	meeting := Meeting{
-		ID:        meetingID,
-		UserID:    userID,
-		Title:     title,
-		FileName:  fileName,
-		Status:    StatusCreated,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:         meetingID,
+		UserID:     userID,
+		Title:      title,
+		FileName:   fileName,
+		SourcePath: sourcePath,
+		Status:     StatusCreated,
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
 	task := Task{
 		ID:        taskID,

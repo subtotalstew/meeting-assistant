@@ -11,14 +11,14 @@ import (
 )
 
 const meetingColumns = `
-    m.id, m.user_id, m.title, m.file_name, m.status, m.error, m.created_at, m.updated_at`
+    m.id, m.user_id, m.title, m.file_name, m.source_path, m.status, m.error, m.created_at, m.updated_at`
 
 // summaryPreviewLen — сколько символов выжимки показываем в списке встреч.
 const summaryPreviewLen = 200
 
 const qInsertMeeting = `
-INSERT INTO meetings (id, user_id, title, file_name, status, error, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+INSERT INTO meetings (id, user_id, title, file_name, source_path, status, error, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
 
 const qInsertTask = `
 INSERT INTO processing_tasks (id, meeting_id, status, attempts, error, created_at, updated_at)
@@ -55,6 +55,7 @@ func (s *Store) CreateMeeting(ctx context.Context, meeting domain.Meeting, task 
 			meeting.UserID,
 			meeting.Title,
 			meeting.FileName,
+			meeting.SourcePath,
 			string(meeting.Status),
 			meeting.Error,
 			meeting.CreatedAt,
@@ -140,6 +141,7 @@ func scanMeeting(row rowScanner) (domain.Meeting, error) {
 		&meeting.UserID,
 		&meeting.Title,
 		&meeting.FileName,
+		&meeting.SourcePath,
 		&status,
 		&meeting.Error,
 		&meeting.CreatedAt,
@@ -162,6 +164,7 @@ func scanMeetingItem(row rowScanner) (domain.MeetingItem, error) {
 		&item.UserID,
 		&item.Title,
 		&item.FileName,
+		&item.SourcePath,
 		&status,
 		&item.Error,
 		&item.CreatedAt,

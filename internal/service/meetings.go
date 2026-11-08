@@ -64,7 +64,7 @@ func (s *Service) LoadMeeting(ctx context.Context, userID uuid.UUID, path string
 		return domain.Meeting{}, err
 	}
 
-	meeting, task, err := domain.NewMeeting(userID, "", filepath.Base(path))
+	meeting, task, err := domain.NewMeeting(userID, "", path)
 	if err != nil {
 		return domain.Meeting{}, err
 	}

@@ -195,6 +195,13 @@ func TestIntegrationCreateMeetingWithTask(t *testing.T) {
 	if stored.Title != "sprint-review" {
 		t.Errorf("название = %q, ожидалось %q", stored.Title, "sprint-review")
 	}
+	// Путь к исходному файлу нужен фоновому обработчику, чтобы прочитать запись.
+	if stored.SourcePath != meeting.SourcePath {
+		t.Errorf("SourcePath = %q, ожидался %q", stored.SourcePath, meeting.SourcePath)
+	}
+	if stored.FileName != "sprint-review.ogg" {
+		t.Errorf("FileName = %q, ожидалось %q", stored.FileName, "sprint-review.ogg")
+	}
 
 	storedTask, err := store.GetTask(ctx, meeting.ID)
 	if err != nil {
