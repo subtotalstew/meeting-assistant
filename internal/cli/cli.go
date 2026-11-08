@@ -21,8 +21,11 @@ import (
 // Значения по умолчанию для флагов команд.
 const (
 	defaultWaitTimeout = 5 * time.Minute
-	pollInterval       = 300 * time.Millisecond
 )
+
+// pollInterval — период опроса статуса при ожидании обработки.
+// Переменная, а не константа: тесты уменьшают её, чтобы не ждать в реальном времени.
+var pollInterval = 300 * time.Millisecond
 
 // Service — то, что CLI нужно от бизнес-логики.
 //
