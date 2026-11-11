@@ -177,6 +177,45 @@ func TestShellChatUsesLastMeeting(t *testing.T) {
 	}
 }
 
+// Без последней встречи в сессии берётся последняя встреча пользователя из базы.
+func TestShellFallsBackToLastMeetingFromStore(t *testing.T) {
+	storedID := uuid.New()
+
+	svc := userStub(t)
+	svc.listMeetingsFunc = func(context.Context, uuid.UUID) ([]domain.MeetingItem, error) {
+		return []domain.MeetingItem{{Meeting: domain.Meeting{ID: storedID, Title: "старая встреча"}}}, nil
+	}
+
+	var got uuid.UUID
+	svc.summaryFunc = func(_ context.Context, _ uuid.UUID, meetingID uuid.UUID) (domain.Summary, error) {
+		got = meetingID
+		return domain.Summary{Text: "выжимка"}, nil
+	}
+
+	if _, err := runShellWith(t, svc, &fakeWorker{}, "summary\nexit\n"); err != nil {
+		t.Fatalf("оболочка вернула ошибку: %v", err)
+	}
+	if got != storedID {
+		t.Errorf("summary запросил %s, ожидалась последняя в базе %s", got, storedID)
+	}
+}
+
+// Встреч нет вовсе: подсказка про load, а не техническая ошибка cobra.
+func TestShellWithoutAnyMeetingGivesHint(t *testing.T) {
+	svc := userStub(t)
+	svc.listMeetingsFunc = func(context.Context, uuid.UUID) ([]domain.MeetingItem, error) {
+		return nil, nil
+	}
+
+	stdout, err := runShellWith(t, svc, &fakeWorker{}, "summary\nexit\n")
+	if err != nil {
+		t.Fatalf("оболочка вернула ошибку: %v", err)
+	}
+	if !strings.Contains(stdout, "сначала выполните load") {
+		t.Errorf("нет подсказки про load: %q", stdout)
+	}
+}
+
 func TestSplitArgs(t *testing.T) {
 	cases := []struct {
 		name string

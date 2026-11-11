@@ -48,7 +48,8 @@ func (a *App) runShellFrom(ctx context.Context, name string, in io.Reader) error
 
 	lines, scanErr := readLines(ctx, in)
 
-	a.printf("интерактивный режим, пользователь %s\n", name)
+	label := a.promptLabel(ctx)
+	a.printf("интерактивный режим, пользователь %s\n", label)
 	a.printf("команды без --user; help — справка, exit — выход\n")
 
 	// cancel отменяет текущую команду; после отмены создаётся новый контекст.
@@ -59,7 +60,7 @@ func (a *App) runShellFrom(ctx context.Context, name string, in io.Reader) error
 	cmdCtx, cancel := context.WithCancel(ctx)
 
 	for {
-		a.printf("%s> ", name)
+		a.printf("%s> ", label)
 
 		var line string
 		select {
@@ -118,6 +119,41 @@ func (a *App) runShellFrom(ctx context.Context, name string, in io.Reader) error
 	}
 }
 
+// promptLabel возвращает короткое имя для приглашения: сам идентификатор
+// пользователя, а не внутренний UUID.
+//
+// В CLI пользователя задаёт внешний идентификатор (например, `eugene`), и именно
+// его человек вводил — поэтому его и видно в приглашении.
+func (a *App) promptLabel(ctx context.Context) string {
+	user, err := a.currentUser(ctx)
+	if err != nil {
+		return a.userID
+	}
+	return user.ExternalID
+}
+
+// lastMeetingID возвращает последнюю встречу сессии, а если её нет — последнюю
+// встречу пользователя из базы. Второе нужно, когда оболочку открыли заново:
+// встреча уже есть, но в этой сессии ничего не загружали.
+func (a *App) lastMeetingID(ctx context.Context) string {
+	if a.lastMeeting != "" {
+		return a.lastMeeting
+	}
+
+	user, err := a.currentUser(ctx)
+	if err != nil {
+		return ""
+	}
+
+	meetings, err := a.svc.ListMeetings(ctx, user.ID)
+	if err != nil || len(meetings) == 0 {
+		a.printf("встреч пока нет: загрузите файл командой load <path>\n")
+		return ""
+	}
+
+	return meetings[0].ID.String()
+}
+
 // executeLine выполняет одну строку оболочки как обычную команду CLI.
 //
 // Дерево команд собирается заново: cobra хранит значения флагов между запусками,
@@ -134,14 +170,19 @@ func (a *App) executeLine(ctx context.Context, args []string) error {
 
 	if m := a.flagValue(args, []string{"-m", "--meeting"}); m != "" {
 		a.chatMeeting = m
-	} else if a.lastMeeting != "" && a.wantsMeeting(args) {
+	} else if a.wantsMeeting(args) && !hasPositionalMeetingID(args) {
 		// chat ждёт встречу во флаге, остальные команды — аргументом.
 		// Флаг, а не аргумент: cobra разбирает аргументы после того, как
 		// значения полей уже прочитаны, и добавленный аргумент до chat не дойдёт.
-		if wantsPositionalMeetingID(args) && !hasPositionalMeetingID(args) {
-			args = append(args, a.lastMeeting)
-		} else if args[0] == "chat" {
-			args = append(args, "-m", a.lastMeeting)
+		meetingID := a.lastMeetingID(ctx)
+		if meetingID == "" {
+			return errors.New("не указана встреча: сначала выполните load <path>, а если работали не в этой сессии — укажите id: " + args[0] + " <id>")
+		}
+
+		if wantsPositionalMeetingID(args) {
+			args = append(args, meetingID)
+		} else {
+			args = append(args, "-m", meetingID)
 		}
 	}
 
