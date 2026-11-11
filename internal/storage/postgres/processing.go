@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -13,6 +14,38 @@ import (
 
 const taskColumns = `
     id, meeting_id, status, attempts, error, started_at, finished_at, created_at, updated_at`
+
+// qClaimTasks атомарно забирает из очереди до $2 задач и переводит их в работу.
+//
+// FOR UPDATE SKIP LOCKED — ключевая часть: строку блокирует один диспетчер,
+// остальные её пропускают и берут следующую, а не ждут освобождения блокировки.
+// Поэтому несколько процессов (несколько serve) делят очередь между собой.
+//
+// attempts увеличивается здесь, а не в обработчике: попытка начинается в момент
+// захвата, и если процесс упадёт сразу после него, попытка всё равно учтена.
+const qClaimTasks = `
+UPDATE processing_tasks t
+SET status     = 'processing',
+    attempts   = t.attempts + 1,
+    started_at = now(),
+    updated_at = now()
+FROM (
+    SELECT id
+    FROM processing_tasks
+    WHERE status = 'created'
+    ORDER BY created_at, id
+    FOR UPDATE SKIP LOCKED
+    LIMIT $1
+) picked
+WHERE t.id = picked.id
+RETURNING t.meeting_id`
+
+// qTouchMeetings переводит встречи захваченных задач в processing.
+// Отдельным запросом вместо цикла: батч забирается пачкой, пачкой же обновляется.
+const qTouchMeetings = `
+UPDATE meetings
+SET status = 'processing', error = '', updated_at = now()
+WHERE id = ANY($1) AND status IN ('created', 'failed')`
 
 // qStartProcessing переводит задачу в работу, увеличивая счётчик попыток.
 // Условие status = 'created' не даёт двум обработчикам взять одну задачу дважды.
@@ -89,6 +122,56 @@ ON CONFLICT (meeting_id) DO UPDATE
 SET text       = EXCLUDED.text,
     provider   = EXCLUDED.provider,
     created_at = EXCLUDED.created_at`
+
+// ClaimTasks забирает из очереди до limit задач и переводит их в processing.
+//
+// Это замена StartProcessing для воркеров очереди: переход created -> processing
+// выполняет именно тот, кто забрал задачу, ровно один раз. Статус встречи
+// меняется в той же транзакции, что и статус задачи: пользователь смотрит на
+// встречу (команда status), а обработчик — на задачу, и расхождение между ними
+// выглядит как зависание.
+func (s *Store) ClaimTasks(ctx context.Context, limit int) ([]uuid.UUID, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	var claimed []uuid.UUID
+
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, qClaimTasks, limit)
+		if err != nil {
+			return fmt.Errorf("выборка задач из очереди: %w", err)
+		}
+
+		for rows.Next() {
+			var meetingID uuid.UUID
+			if err := rows.Scan(&meetingID); err != nil {
+				rows.Close()
+				return fmt.Errorf("чтение идентификатора встречи: %w", err)
+			}
+			claimed = append(claimed, meetingID)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("чтение задач из очереди: %w", err)
+		}
+
+		if len(claimed) == 0 {
+			return nil
+		}
+
+		if _, err := tx.Exec(ctx, qTouchMeetings, claimed); err != nil {
+			return fmt.Errorf("перевод встреч в обработку: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return claimed, nil
+}
 
 // StartProcessing переводит задачу в статус processing.
 //
@@ -214,6 +297,111 @@ func (s *Store) ResetForRetry(ctx context.Context, meetingID uuid.UUID) error {
 
 		if _, err := tx.Exec(ctx, qResetForRetryMeeting, meetingID); err != nil {
 			return fmt.Errorf("сброс статуса встречи: %w", err)
+		}
+
+		return nil
+	})
+}
+
+const qReclaimStaleTasks = `
+UPDATE processing_tasks
+SET status     = 'created',
+    started_at = NULL,
+    finished_at = NULL,
+    updated_at = now()
+WHERE status = 'processing'
+  AND started_at < now() - make_interval(secs => $1)
+RETURNING meeting_id`
+
+const qReclaimStaleMeetings = `
+UPDATE meetings
+SET status = 'created', error = '', updated_at = now()
+WHERE id = ANY($1) AND status = 'processing'`
+
+// ReclaimStale возвращает в очередь задачи, которые «зависли» в processing.
+//
+// Признак зависания — started_at старше lease. Так выглядит процесс, убитый
+// посреди обработки: строку никто не освободит, и без такого возврата встреча
+// навсегда осталась бы в processing. Глобальный сброс всех processing не
+// используется: он сбрасывал бы и задачи живого обработчика в другом процессе.
+func (s *Store) ReclaimStale(ctx context.Context, lease time.Duration) ([]uuid.UUID, error) {
+	if lease <= 0 {
+		return nil, nil
+	}
+
+	var reclaimed []uuid.UUID
+
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, qReclaimStaleTasks, lease.Seconds())
+		if err != nil {
+			return fmt.Errorf("выборка зависших задач: %w", err)
+		}
+
+		for rows.Next() {
+			var meetingID uuid.UUID
+			if err := rows.Scan(&meetingID); err != nil {
+				rows.Close()
+				return fmt.Errorf("чтение идентификатора встречи: %w", err)
+			}
+			reclaimed = append(reclaimed, meetingID)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("чтение зависших задач: %w", err)
+		}
+
+		if len(reclaimed) == 0 {
+			return nil
+		}
+
+		if _, err := tx.Exec(ctx, qReclaimStaleMeetings, reclaimed); err != nil {
+			return fmt.Errorf("возврат встреч в очередь: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return reclaimed, nil
+}
+
+const qRequeueInterruptedMeetings = `
+UPDATE meetings
+SET status = 'created', error = '', updated_at = now()
+WHERE id = $1 AND status = 'processing'`
+
+const qRequeueInterruptedTask = `
+UPDATE processing_tasks
+SET status      = 'created',
+    started_at  = NULL,
+    finished_at = NULL,
+    error       = '',
+    updated_at  = now()
+WHERE meeting_id = $1 AND status = 'processing'
+RETURNING id`
+
+// RequeueInterrupted возвращает задачу в очередь, если обработка была прервана
+// остановкой приложения. Вызывается обработчиком при отмене контекста.
+//
+// Возврат в created, а не failed: обработка не завершилась сбоем, её просто
+// прервали, и следующий запуск должен её продолжить. Если задача уже успела
+// уйти в терминальный статус (её довёл другой обработчик), запрос ничего не
+// сделает — это ожидаемо.
+func (s *Store) RequeueInterrupted(ctx context.Context, meetingID uuid.UUID) error {
+	return s.withTx(ctx, func(tx pgx.Tx) error {
+		var taskID uuid.UUID
+		err := tx.QueryRow(ctx, qRequeueInterruptedTask, meetingID).Scan(&taskID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			return fmt.Errorf("возврат задачи в очередь: %w", err)
+		}
+
+		if _, err := tx.Exec(ctx, qRequeueInterruptedMeetings, meetingID); err != nil {
+			return fmt.Errorf("возврат встречи в очередь: %w", err)
 		}
 
 		return nil

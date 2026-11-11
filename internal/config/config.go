@@ -44,6 +44,7 @@ const (
 	defaultConcurrency     = 4
 	defaultQueueSize       = 64
 	defaultTaskTimeout     = 10 * time.Minute
+	defaultPollInterval    = 500 * time.Millisecond
 	defaultLogFormat       = FormatJSON
 	defaultSpeechProvider  = ProviderMock
 	defaultLLMProvider     = ProviderMock
@@ -90,6 +91,8 @@ type Worker struct {
 	QueueSize int
 	// TaskTimeout — предел на весь цикл обработки одной встречи.
 	TaskTimeout time.Duration
+	// PollInterval — период опроса очереди в базе диспетчером.
+	PollInterval time.Duration
 }
 
 // defaults возвращает конфигурацию со значениями по умолчанию.
@@ -113,9 +116,10 @@ func defaults() Config {
 			Timeout:  defaultLLMTimeout,
 		},
 		Worker: Worker{
-			Concurrency: defaultConcurrency,
-			QueueSize:   defaultQueueSize,
-			TaskTimeout: defaultTaskTimeout,
+			Concurrency:  defaultConcurrency,
+			QueueSize:    defaultQueueSize,
+			TaskTimeout:  defaultTaskTimeout,
+			PollInterval: defaultPollInterval,
 		},
 		ShutdownTimeout: defaultShutdownTimeout,
 		AutoMigrate:     true,

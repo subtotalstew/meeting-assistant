@@ -34,6 +34,7 @@ type fakeStore struct {
 	summary       domain.Summary
 	failureReason string
 	savedFailure  bool
+	requeued      bool
 }
 
 func (f *fakeStore) record(status domain.Status) {
@@ -50,11 +51,20 @@ func (f *fakeStore) GetMeetingByID(context.Context, uuid.UUID) (domain.Meeting, 
 }
 
 func (f *fakeStore) StartProcessing(context.Context, uuid.UUID) (domain.Task, error) {
+	// Обработчик его больше не вызывает: интерфейс Store сузился. Метод оставлен,
+	// чтобы тест на лишний вызов компилировался.
 	if f.startErr != nil {
 		return domain.Task{}, f.startErr
 	}
 	f.record(domain.StatusProcessing)
 	return domain.Task{Status: domain.StatusProcessing, Attempts: 1}, nil
+}
+
+func (f *fakeStore) RequeueInterrupted(_ context.Context, _ uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requeued = true
+	return nil
 }
 
 func (f *fakeStore) SaveTranscription(_ context.Context, transcription domain.Transcription) error {
@@ -131,7 +141,6 @@ func TestProcessFullCycle(t *testing.T) {
 	}
 
 	want := []domain.Status{
-		domain.StatusProcessing,
 		domain.StatusTranscribed,
 		domain.StatusSummarized,
 		domain.StatusCompleted,
@@ -230,8 +239,9 @@ func TestProcessTimeoutRecordsFailure(t *testing.T) {
 	}
 }
 
-// Отмена контекста (остановка приложения) тоже должна фиксировать failed.
-func TestProcessCancelledRecordsFailure(t *testing.T) {
+// Отмена контекста — это остановка приложения, а не сбой обработки: задачу
+// нужно вернуть в очередь, чтобы следующий запуск её продолжил.
+func TestProcessCancelledRequeuesTask(t *testing.T) {
 	meeting := testMeeting()
 	store := &fakeStore{meeting: meeting}
 
@@ -246,8 +256,11 @@ func TestProcessCancelledRecordsFailure(t *testing.T) {
 	if err := processor.Process(ctx, meeting.ID); err == nil {
 		t.Fatal("ожидалась ошибка отмены")
 	}
-	if !store.savedFailure {
-		t.Fatal("после отмены задача обязана перейти в failed")
+	if !store.requeued {
+		t.Fatal("после остановки задача должна вернуться в очередь")
+	}
+	if store.savedFailure {
+		t.Error("остановка не должна помечать задачу failed")
 	}
 }
 
@@ -267,18 +280,21 @@ func TestProcessUnknownMeeting(t *testing.T) {
 	}
 }
 
-// Задачу уже забрал другой обработчик: статус встречи менять нельзя.
-func TestProcessAlreadyTakenTask(t *testing.T) {
+// Статус processing выставляет тот, кто забрал задачу из очереди, а не обработчик.
+func TestProcessDoesNotStartTask(t *testing.T) {
 	meeting := testMeeting()
-	store := &fakeStore{meeting: meeting, startErr: domain.ErrNotFound}
+	store := &fakeStore{meeting: meeting, startErr: errors.New("не должен вызываться")}
 
 	processor := newTestProcessor(store, speech.NewMock(), llm.NewMock(), time.Minute)
 
-	if err := processor.Process(context.Background(), meeting.ID); err == nil {
-		t.Fatal("ожидалась ошибка взятия задачи")
+	if err := processor.Process(context.Background(), meeting.ID); err != nil {
+		t.Fatalf("Process() вернул ошибку: %v", err)
 	}
-	if store.savedFailure {
-		t.Error("нельзя помечать failed задачу, которую взял другой обработчик")
+
+	for _, status := range store.statusSequence() {
+		if status == domain.StatusProcessing {
+			t.Fatal("обработчик не должен сам переводить задачу в processing")
+		}
 	}
 }
 

@@ -69,7 +69,7 @@ func TestLoadWaitsForCompletion(t *testing.T) {
 
 	worker := &fakeWorker{}
 
-	stdout, _, err := run(t, svc, worker, "load", "sprint-review.ogg", "--user", "alice", "--wait-timeout", "2s")
+	stdout, _, err := run(t, svc, worker, "load", "sprint-review.ogg", "--user", "alice", "--wait", "--wait-timeout", "2s")
 	if err != nil {
 		t.Fatalf("load вернул ошибку: %v", err)
 	}
@@ -88,7 +88,9 @@ func TestLoadWaitsForCompletion(t *testing.T) {
 	}
 }
 
-func TestLoadNoWaitDoesNotStartWorker(t *testing.T) {
+// Без --wait load только ставит задачу в очередь: диспетчер и пул не нужны,
+// задачу заберёт отдельный serve.
+func TestLoadWithoutWaitDoesNotStartWorker(t *testing.T) {
 	meeting := domain.Meeting{ID: uuid.New(), FileName: "meeting.ogg", Status: domain.StatusCreated}
 
 	svc := userStub(t)
@@ -98,13 +100,13 @@ func TestLoadNoWaitDoesNotStartWorker(t *testing.T) {
 
 	worker := &fakeWorker{}
 
-	stdout, _, err := run(t, svc, worker, "load", "meeting.ogg", "--user", "alice", "--no-wait")
+	stdout, _, err := run(t, svc, worker, "load", "meeting.ogg", "--user", "alice")
 	if err != nil {
 		t.Fatalf("load вернул ошибку: %v", err)
 	}
 
 	if started, _ := worker.state(); started {
-		t.Error("с --no-wait пул запускать не нужно")
+		t.Error("без --wait пул запускать не нужно")
 	}
 	if !strings.Contains(stdout, "serve") {
 		t.Errorf("в выводе нет подсказки про serve: %q", stdout)
@@ -131,7 +133,7 @@ func TestLoadReportsFailedTask(t *testing.T) {
 		}, nil
 	}
 
-	stdout, _, err := run(t, svc, &fakeWorker{}, "load", "broken.ogg", "--user", "alice", "--wait-timeout", "2s")
+	stdout, _, err := run(t, svc, &fakeWorker{}, "load", "broken.ogg", "--user", "alice", "--wait", "--wait-timeout", "2s")
 	if err != nil {
 		t.Fatalf("load вернул ошибку: %v", err)
 	}
@@ -162,7 +164,7 @@ func TestLoadJSONOutput(t *testing.T) {
 		return service.MeetingStatus{Meeting: completed, Task: domain.Task{Status: completed.Status}}, nil
 	}
 
-	stdout, _, err := run(t, svc, &fakeWorker{}, "load", "meeting.ogg", "--user", "alice", "--json", "--wait-timeout", "2s")
+	stdout, _, err := run(t, svc, &fakeWorker{}, "load", "meeting.ogg", "--user", "alice", "--json", "--wait", "--wait-timeout", "2s")
 	if err != nil {
 		t.Fatalf("load вернул ошибку: %v", err)
 	}
@@ -421,7 +423,7 @@ func TestRetryResubmitsMeeting(t *testing.T) {
 		}, nil
 	}
 
-	stdout, _, err := run(t, svc, &fakeWorker{}, "retry", meetingID.String(), "--user", "alice", "--wait-timeout", "2s")
+	stdout, _, err := run(t, svc, &fakeWorker{}, "retry", meetingID.String(), "--user", "alice", "--wait", "--wait-timeout", "2s")
 	if err != nil {
 		t.Fatalf("retry вернул ошибку: %v", err)
 	}
@@ -433,7 +435,7 @@ func TestRetryResubmitsMeeting(t *testing.T) {
 	}
 }
 
-func TestRetryNoWait(t *testing.T) {
+func TestRetryWithoutWait(t *testing.T) {
 	meetingID := uuid.New()
 
 	svc := userStub(t)
@@ -442,12 +444,12 @@ func TestRetryNoWait(t *testing.T) {
 	}
 
 	worker := &fakeWorker{}
-	stdout, _, err := run(t, svc, worker, "retry", meetingID.String(), "--user", "alice", "--no-wait")
+	stdout, _, err := run(t, svc, worker, "retry", meetingID.String(), "--user", "alice")
 	if err != nil {
 		t.Fatalf("retry вернул ошибку: %v", err)
 	}
 	if started, _ := worker.state(); started {
-		t.Error("с --no-wait пул запускать не нужно")
+		t.Error("без --wait пул запускать не нужно")
 	}
 	if !strings.Contains(stdout, "created") {
 		t.Errorf("в выводе нет статуса: %q", stdout)

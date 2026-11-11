@@ -15,7 +15,7 @@ import (
 // Ошибки пула обработчиков.
 var (
 	// ErrQueueFull — очередь переполнена, задача осталась в базе в статусе created
-	// и будет подхвачена восстановлением при следующем старте.
+	// и будет подхвачена диспетчером или восстановлением при следующем старте.
 	ErrQueueFull = errors.New("очередь обработки переполнена")
 	// ErrStopped — пул остановлен, новые задачи не принимаются.
 	ErrStopped = errors.New("пул обработчиков остановлен")
@@ -28,6 +28,13 @@ const (
 	minQueueSize       = 1
 	defaultConcurrency = 4
 	defaultQueueSize   = 64
+	// defaultTaskTimeout — бюджет одной задачи, если он не задан явно.
+	// Используется и как основа для аренды захваченной задачи.
+	defaultTaskTimeout = 10 * time.Minute
+	// defaultPollInterval — как часто диспетчер заглядывает в базу.
+	defaultPollInterval = 500 * time.Millisecond
+	// maxIdlePollInterval — предел нарастания интервала опроса в простое.
+	maxIdlePollInterval = 2 * time.Second
 )
 
 // Config — настройки пула.
@@ -37,7 +44,18 @@ type Config struct {
 	Concurrency int
 	// QueueSize — размер буфера очереди ожидающих задач.
 	QueueSize int
+	// TaskTimeout — бюджет обработки одной встречи. Задача, захваченная
+	// обработчиком, считается зависшей, если висит в processing дольше
+	// TaskTimeout + leaseGrace.
+	TaskTimeout time.Duration
+	// PollInterval — базовый период опроса очереди в базе.
+	PollInterval time.Duration
 }
+
+// leaseGrace — запас к бюджету задачи перед тем, как считать её зависшей.
+// Без запаса живая задача на границе таймаута могла бы быть уведена из-под
+// обработчика и запущена повторно.
+const leaseGrace = time.Minute
 
 // WithDefaults возвращает настройки с заполненными и проверенными значениями.
 func (c Config) WithDefaults() Config {
@@ -50,6 +68,12 @@ func (c Config) WithDefaults() Config {
 	if c.QueueSize < minQueueSize {
 		c.QueueSize = defaultQueueSize
 	}
+	if c.TaskTimeout <= 0 {
+		c.TaskTimeout = defaultTaskTimeout
+	}
+	if c.PollInterval <= 0 {
+		c.PollInterval = defaultPollInterval
+	}
 	return c
 }
 
@@ -59,8 +83,14 @@ type taskProcessor interface {
 	Process(ctx context.Context, meetingID uuid.UUID) error
 }
 
-// recoveryStore отдаёт встречи, обработка которых была прервана прошлым запуском.
-type recoveryStore interface {
+// QueueStore — очередь в базе: то, что пул забирает в работу.
+//
+// ClaimTasks атомарно переводит задачи из created в processing, поэтому статус
+// задачи в базу пишет тот, кто её забрал, а не сам обработчик. ReclaimStale
+// возвращает в очередь задачи, зависшие из-за упавшего процесса.
+type QueueStore interface {
+	ClaimTasks(ctx context.Context, limit int) ([]uuid.UUID, error)
+	ReclaimStale(ctx context.Context, lease time.Duration) ([]uuid.UUID, error)
 	RecoverPending(ctx context.Context, limit int) ([]uuid.UUID, error)
 }
 
@@ -68,29 +98,37 @@ type recoveryStore interface {
 //
 // Лимит параллелизма задаётся количеством воркеров, а не семафором: лишние задачи
 // ждут в буфере очереди, а не порождают новые горутины. Поэтому число горутин
-// постоянно и равно Concurrency, сколько бы файлов ни загрузили.
+// постоянно и равно Concurrency + 1 (диспетчер), сколько бы файлов ни загрузили.
+//
+// Задачи попадают в канал двумя путями: из базы через диспетчера (между
+// процессами) и напрямую через Enqueue (внутри процесса, чтобы команда load
+// не ждала тика опроса).
 type Pool struct {
 	processor taskProcessor
-	store     recoveryStore
+	store     QueueStore
 	log       *slog.Logger
 	config    Config
 
 	queue chan uuid.UUID
+	// kick будит диспетчера: появилась новая задача, не надо ждать тика.
+	kick chan struct{}
 
 	startOnce sync.Once
 	stopOnce  sync.Once
 	cancel    context.CancelFunc
-	wg        sync.WaitGroup
+	// dispatchWG считает горутины: воркеры и диспетчер.
+	dispatchWG sync.WaitGroup
 
 	stopped atomic.Bool
+	started atomic.Bool
 	active  atomic.Int64
 }
 
 // NewPool создаёт пул обработчиков. Работа начинается только после Start.
 //
-// store нужен для восстановления задач после перезапуска; если он не задан,
-// Recover ничего не делает.
-func NewPool(processor taskProcessor, store recoveryStore, logger *slog.Logger, cfg Config) *Pool {
+// store нужен для очереди в базе; если он не задан, диспетчер и Recover
+// ничего не делают, и пул работает только с Enqueue.
+func NewPool(processor taskProcessor, store QueueStore, logger *slog.Logger, cfg Config) *Pool {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -103,34 +141,45 @@ func NewPool(processor taskProcessor, store recoveryStore, logger *slog.Logger, 
 		log:       logger,
 		config:    cfg,
 		queue:     make(chan uuid.UUID, cfg.QueueSize),
+		kick:      make(chan struct{}, 1),
 	}
 }
 
-// Start запускает воркеры.
+// Start запускает диспетчера и воркеры.
+//
+// Порядок важен: диспетчер стартует первым, чтобы с первого же тика отдавать
+// задачи в канал; воркеры читают из канала и ни от кого не зависят.
 //
 // Родительский контекст связывает пул с жизненным циклом приложения: его отмена
 // останавливает обработку так же, как явный Stop.
 func (p *Pool) Start(ctx context.Context) {
 	p.startOnce.Do(func() {
+		p.started.Store(true)
 		workerCtx, cancel := context.WithCancel(ctx)
 		p.cancel = cancel
 
+		if p.store != nil {
+			p.dispatchWG.Add(1)
+			go p.dispatch(workerCtx)
+		}
+
 		for number := 1; number <= p.config.Concurrency; number++ {
-			p.wg.Add(1)
+			p.dispatchWG.Add(1)
 			go p.worker(workerCtx, number)
 		}
 
 		p.log.Info("пул обработчиков запущен",
 			"workers", p.config.Concurrency,
 			"queue_size", p.config.QueueSize,
+			"poll_interval", p.config.PollInterval.String(),
 		)
 	})
 }
 
 // Enqueue ставит встречу в очередь, не блокируя вызывающий код.
 //
-// Если очередь полна, возвращается ErrQueueFull: лучше сообщить об этом в лог,
-// чем держать команду пользователя в ожидании свободного воркера.
+// Если очередь полна, возвращается ErrQueueFull: задача уже сохранена в базе
+// в статусе created, поэтому её подхватит диспетчер — терять загрузку нельзя.
 func (p *Pool) Enqueue(meetingID uuid.UUID) error {
 	if p.stopped.Load() {
 		return ErrStopped
@@ -138,9 +187,20 @@ func (p *Pool) Enqueue(meetingID uuid.UUID) error {
 
 	select {
 	case p.queue <- meetingID:
+		p.Kick()
 		return nil
 	default:
 		return fmt.Errorf("%w: ожидает обработки %d", ErrQueueFull, len(p.queue))
+	}
+}
+
+// Kick будит диспетчера, чтобы он не ждал очередного тика.
+//
+// Неблокирующая отправка: если пробуждение уже лежит в канале, второе не нужно.
+func (p *Pool) Kick() {
+	select {
+	case p.kick <- struct{}{}:
+	default:
 	}
 }
 
@@ -156,9 +216,12 @@ func (p *Pool) Pending() int {
 
 // Recover возвращает в очередь задачи, прерванные предыдущим запуском.
 //
-// Вызывается после Start, до приёма новых команд. Ставить восстановленные задачи
-// нужно блокирующе: если очередь переполнена, лучше подождать, чем потерять
-// встречу, которая осталась в статусе created.
+// Вызывается один раз при старте serve, до приёма новых команд. Ставить
+// восстановленные задачи нужно блокирующе: если очередь переполнена, лучше
+// подождать, чем потерять встречу, которая осталась в статусе created.
+//
+// Из load и retry Recover вызывать нельзя: он сбрасывал бы задачи, которые
+// прямо сейчас обрабатывает другой процесс.
 func (p *Pool) Recover(ctx context.Context) error {
 	if p.store == nil {
 		return nil
@@ -186,11 +249,112 @@ func (p *Pool) Recover(ctx context.Context) error {
 	return nil
 }
 
+// dispatch забирает задачи из базы и раскладывает их в канал.
+//
+// Одна горутина: в базу ходит ровно один запрос за такт, сколько бы воркеров
+// ни было. Пачка ограничена числом свободных слотов — диспетчер не заберёт
+// из базы больше, чем воркеры смогут начать обрабатывать. Это backpressure
+// в терминах очереди: лишнее остаётся в created, а не висит в памяти процесса.
+//
+// Такт адаптивный: пока работа находится — базовый интервал, в простое —
+// он нарастает до maxIdlePollInterval, чтобы не опрашивать базу впустую.
+func (p *Pool) dispatch(ctx context.Context) {
+	defer p.dispatchWG.Done()
+
+	interval := p.config.PollInterval
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		case <-p.kick:
+		}
+
+		claimed := p.claimOnce(ctx)
+
+		if claimed {
+			interval = p.config.PollInterval
+		} else {
+			interval *= 2
+			if interval > maxIdlePollInterval {
+				interval = maxIdlePollInterval
+			}
+		}
+
+		timer.Reset(interval)
+	}
+}
+
+// claimOnce забирает пачку задач и раскладывает её в канал.
+// Возвращает true, если задачи были.
+func (p *Pool) claimOnce(ctx context.Context) bool {
+	limit := p.freeSlots()
+	if limit <= 0 {
+		return false
+	}
+
+	lease := p.config.TaskTimeout + leaseGrace
+
+	// Задачи, зависшие из-за упавшего процесса, возвращаются в очередь.
+	// Ошибка здесь не ломает диспетчера: следующий такт попробует снова.
+	if _, err := p.store.ReclaimStale(ctx, lease); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			p.log.Warn("возврат зависших задач", "error", err.Error())
+		}
+	}
+
+	tasks, err := p.store.ClaimTasks(ctx, limit)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			p.log.Warn("выборка задач из очереди", "error", err.Error())
+		}
+		return false
+	}
+
+	for _, meetingID := range tasks {
+		select {
+		case p.queue <- meetingID:
+		case <-ctx.Done():
+			// Захваченная задача осталась в processing и вернётся в очередь
+			// по lease при следующем старте.
+			return len(tasks) > 0
+		}
+	}
+
+	if len(tasks) > 0 {
+		p.log.Debug("очередь пополнена", "count", len(tasks))
+	}
+
+	return len(tasks) > 0
+}
+
+// freeSlots считает, сколько задач воркеры смогут начать прямо сейчас.
+//
+// Считаем через буфер канала и счётчик активных задач, а не через
+// «Concurrency − active»: задача, уже лежащая в канале, тоже ждёт воркера,
+// и если её не учесть, диспетчер наберёт лишнего.
+func (p *Pool) freeSlots() int {
+	slots := p.config.Concurrency - int(p.active.Load()) - len(p.queue)
+	if slots <= 0 {
+		return 0
+	}
+	return slots
+}
+
 // Stop останавливает пул и ждёт завершения воркеров.
 //
 // Незавершённые задачи не теряются: они остаются в базе в статусе created
 // или failed и будут подхвачены восстановлением при следующем старте.
 func (p *Pool) Stop(ctx context.Context) error {
+	// Пул мог не запускаться: main останавливает его всегда, а большинству
+	// команд фоновая обработка не нужна. В этом случае ждать нечего.
+	if !p.started.Load() {
+		return nil
+	}
+
 	p.stopOnce.Do(func() {
 		p.stopped.Store(true)
 		if p.cancel != nil {
@@ -200,7 +364,7 @@ func (p *Pool) Stop(ctx context.Context) error {
 
 	done := make(chan struct{})
 	go func() {
-		p.wg.Wait()
+		p.dispatchWG.Wait()
 		close(done)
 	}()
 
@@ -215,7 +379,7 @@ func (p *Pool) Stop(ctx context.Context) error {
 
 // worker читает задачи из очереди, пока не будет отменён контекст.
 func (p *Pool) worker(ctx context.Context, number int) {
-	defer p.wg.Done()
+	defer p.dispatchWG.Done()
 
 	for {
 		select {

@@ -27,3 +27,10 @@ coverage.html
 # Временные файлы.
 tmp/
 .cache/
+
+# Учебные материалы: ТЗ, критерии и локальные конспекты не являются частью
+# дипломного репозитория и не должны попадать в историю.
+docs/ПЛАН.md
+docs/РАЗБОР.md
+docs/technical_specification.md
+docs/graduation_tesis.md

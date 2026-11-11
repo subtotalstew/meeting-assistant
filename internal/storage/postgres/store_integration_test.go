@@ -589,7 +589,189 @@ func TestIntegrationRecoverPending(t *testing.T) {
 	}
 }
 
-// Полнотекстовый поиск по GIN-индексу с подсветкой и запасной поиск по подстроке.
+// Очередь в PostgreSQL: два «процесса» делят задачи между собой, каждая
+// забирается ровно один раз, а зависшая в processing задача возвращается по lease.
+func TestIntegrationClaimTasks(t *testing.T) {
+	store := storeForTest(t)
+	ctx := context.Background()
+
+	user := createUser(t, store, "queue-user")
+
+	const tasks = 20
+	created := make(map[uuid.UUID]bool, tasks)
+	for i := 0; i < tasks; i++ {
+		meeting, _ := createMeeting(t, store, user, "meeting.ogg")
+		created[meeting.ID] = true
+	}
+
+	// Два забора по 5 — как два диспетчера в разных процессах.
+	first, err := store.ClaimTasks(ctx, 5)
+	if err != nil {
+		t.Fatalf("ClaimTasks #1: %v", err)
+	}
+	second, err := store.ClaimTasks(ctx, 5)
+	if err != nil {
+		t.Fatalf("ClaimTasks #2: %v", err)
+	}
+
+	if len(first) != 5 || len(second) != 5 {
+		t.Fatalf("захвачено %d и %d задач, ожидалось по 5", len(first), len(second))
+	}
+
+	seen := make(map[uuid.UUID]bool)
+	for _, id := range append(append([]uuid.UUID{}, first...), second...) {
+		if seen[id] {
+			t.Fatalf("встреча %s захвачена дважды", id)
+		}
+		seen[id] = true
+
+		meeting, err := store.GetMeeting(ctx, id, user.ID)
+		if err != nil {
+			t.Fatalf("GetMeeting: %v", err)
+		}
+		if meeting.Status != domain.StatusProcessing {
+			t.Errorf("статус встречи = %q, ожидался processing", meeting.Status)
+		}
+
+		task, err := store.GetTask(ctx, id)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		if task.Attempts != 1 {
+			t.Errorf("попыток = %d, ожидалась 1", task.Attempts)
+		}
+	}
+
+	// Освобождённые задачи уже не захватываются повторно.
+	again, err := store.ClaimTasks(ctx, 100)
+	if err != nil {
+		t.Fatalf("ClaimTasks #3: %v", err)
+	}
+	if len(again) != tasks-10 {
+		t.Fatalf("повторно захвачено %d задач, ожидалось %d", len(again), tasks-10)
+	}
+	for _, id := range again {
+		if seen[id] {
+			t.Fatalf("захвачена уже обработанная встреча %s", id)
+		}
+	}
+
+	// Протухшая аренда: все processing старше нуля секунд возвращаются в created.
+	reclaimed, err := store.ReclaimStale(ctx, time.Nanosecond)
+	if err != nil {
+		t.Fatalf("ReclaimStale: %v", err)
+	}
+	if len(reclaimed) != tasks {
+		t.Fatalf("возвращено %d задач, ожидалось %d", len(reclaimed), tasks)
+	}
+}
+
+// Восстановление: задача, прерванная остановкой, возвращается в очередь
+// и захватывается повторно, увеличивая счётчик попыток.
+func TestIntegrationRequeueAndReclaim(t *testing.T) {
+	store := storeForTest(t)
+	ctx := context.Background()
+
+	user := createUser(t, store, "reclaim-user")
+	meeting, _ := createMeeting(t, store, user, "interrupted.ogg")
+
+	claimed, err := store.ClaimTasks(ctx, 10)
+	if err != nil {
+		t.Fatalf("ClaimTasks: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("захвачено %d задач, ожидалась 1", len(claimed))
+	}
+
+	// Остановка приложения посреди обработки.
+	if err := store.RequeueInterrupted(ctx, meeting.ID); err != nil {
+		t.Fatalf("RequeueInterrupted: %v", err)
+	}
+
+	task, err := store.GetTask(ctx, meeting.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if task.Status != domain.StatusCreated {
+		t.Fatalf("статус задачи = %q, ожидался created", task.Status)
+	}
+	if task.Attempts != 1 {
+		t.Errorf("попыток = %d, ожидалась 1: попытка уже была начата", task.Attempts)
+	}
+
+	// Повторный возврат для задачи, которая уже не processing, ничего не портит.
+	if err := store.RequeueInterrupted(ctx, meeting.ID); err != nil {
+		t.Fatalf("повторный RequeueInterrupted: %v", err)
+	}
+
+	// Задача снова в очереди и захватывается как обычная.
+	again, err := store.ClaimTasks(ctx, 10)
+	if err != nil {
+		t.Fatalf("ClaimTasks #2: %v", err)
+	}
+	if len(again) != 1 || again[0] != meeting.ID {
+		t.Fatalf("повторно захвачено %v, ожидалось [%s]", again, meeting.ID)
+	}
+
+	task, err = store.GetTask(ctx, meeting.ID)
+	if err != nil {
+		t.Fatalf("GetTask #2: %v", err)
+	}
+	if task.Attempts != 2 {
+		t.Errorf("попыток = %d, ожидалось 2", task.Attempts)
+	}
+}
+
+// Восстановление после жёсткой остановки: задача, зависшая в processing,
+// возвращается арендой и обрабатывается заново с увеличением попыток.
+func TestIntegrationReclaimStaleRetriesInterrupted(t *testing.T) {
+	store := storeForTest(t)
+	ctx := context.Background()
+
+	user := createUser(t, store, "stale-user")
+	meeting, _ := createMeeting(t, store, user, "killed.ogg")
+
+	if _, err := store.ClaimTasks(ctx, 10); err != nil {
+		t.Fatalf("ClaimTasks: %v", err)
+	}
+
+	// Процесс убили посреди обработки: строка осталась в processing.
+	reclaimed, err := store.ReclaimStale(ctx, time.Nanosecond)
+	if err != nil {
+		t.Fatalf("ReclaimStale: %v", err)
+	}
+	if len(reclaimed) != 1 || reclaimed[0] != meeting.ID {
+		t.Fatalf("возвращено %v, ожидалось [%s]", reclaimed, meeting.ID)
+	}
+
+	// Мгновенная аренда не трогает живые задачи.
+	if again, err := store.ReclaimStale(ctx, time.Hour); err != nil || len(again) != 0 {
+		t.Fatalf("ReclaimStale(hour) = %v, %v; ожидалось пусто", again, err)
+	}
+
+	task, err := store.GetTask(ctx, meeting.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if task.Status != domain.StatusCreated {
+		t.Fatalf("статус задачи = %q, ожидался created", task.Status)
+	}
+	if task.Attempts != 1 {
+		t.Errorf("попыток = %d, ожидалась 1", task.Attempts)
+	}
+
+	if _, err := store.ClaimTasks(ctx, 10); err != nil {
+		t.Fatalf("ClaimTasks #2: %v", err)
+	}
+	task, err = store.GetTask(ctx, meeting.ID)
+	if err != nil {
+		t.Fatalf("GetTask #2: %v", err)
+	}
+	if task.Attempts != 2 {
+		t.Errorf("попыток = %d, ожидалось 2", task.Attempts)
+	}
+}
+
 func TestIntegrationSearchFullTextAndSubstring(t *testing.T) {
 	store := storeForTest(t)
 	ctx := context.Background()

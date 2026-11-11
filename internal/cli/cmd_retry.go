@@ -8,6 +8,9 @@ import (
 )
 
 // retryCommand повторяет обработку неуспешной встречи.
+//
+// Команда только возвращает задачу в очередь: дальше её заберёт диспетчер.
+// С --wait она ещё и дожидается результата в этом процессе.
 func (a *App) retryCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "retry <id>",
@@ -31,7 +34,7 @@ func (a *App) retryCommand() *cobra.Command {
 				return err
 			}
 
-			if a.noWait {
+			if !a.waitForResult {
 				return a.printRetried(meeting, nil)
 			}
 
@@ -48,9 +51,10 @@ func (a *App) retryCommand() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&a.noWait, "no-wait", false, "не ждать завершения повторной обработки")
+	cmd.Flags().BoolVar(&a.waitForResult, "wait", false,
+		"дождаться завершения повторной обработки в этом процессе")
 	cmd.Flags().DurationVar(&a.waitTimeout, "wait-timeout", defaultWaitTimeout,
-		"сколько ждать завершения повторной обработки")
+		"сколько ждать завершения повторной обработки (с --wait)")
 
 	return cmd
 }
