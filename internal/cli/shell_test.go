@@ -142,6 +142,41 @@ func TestShellReportsUnclosedQuote(t *testing.T) {
 	}
 }
 
+// chat "<вопрос>" — передаётся как один аргумент, в оболочке кавычки нужны.
+func TestShellChatUsesLastMeeting(t *testing.T) {
+	meetingID := uuid.New()
+
+	svc := userStub(t)
+	svc.loadMeetingFunc = func(context.Context, uuid.UUID, string) (domain.Meeting, error) {
+		return domain.Meeting{ID: meetingID, FileName: "plan.ogg"}, nil
+	}
+
+	var (
+		gotMeeting  uuid.UUID
+		gotQuestion string
+	)
+	svc.askFunc = func(_ context.Context, _ uuid.UUID, mID uuid.UUID, question string) (string, error) {
+		gotMeeting = mID
+		gotQuestion = question
+		return "ответ", nil
+	}
+
+	stdout, err := runShellWith(t, svc, &fakeWorker{}, "load plan.ogg\nchat \"когда встреча?\"\nexit\n")
+	if err != nil {
+		t.Fatalf("оболочка вернула ошибку: %v", err)
+	}
+
+	if gotMeeting != meetingID {
+		t.Errorf("chat запросил встречу %s, ожидалась последняя %s", gotMeeting, meetingID)
+	}
+	if gotQuestion != "когда встреча?" {
+		t.Errorf("вопрос передан как %q", gotQuestion)
+	}
+	if !strings.Contains(stdout, "ответ") {
+		t.Errorf("ответ не показан: %q", stdout)
+	}
+}
+
 func TestSplitArgs(t *testing.T) {
 	cases := []struct {
 		name string

@@ -135,11 +135,13 @@ func (a *App) executeLine(ctx context.Context, args []string) error {
 	if m := a.flagValue(args, []string{"-m", "--meeting"}); m != "" {
 		a.chatMeeting = m
 	} else if a.lastMeeting != "" && a.wantsMeeting(args) {
-		a.chatMeeting = a.lastMeeting
-		if !hasPositionalMeetingID(args) {
-			// status/get/summary и т.п. ждут идентификатор аргументом:
-			// подставляем последнюю встречу сессии.
+		// chat ждёт встречу во флаге, остальные команды — аргументом.
+		// Флаг, а не аргумент: cobra разбирает аргументы после того, как
+		// значения полей уже прочитаны, и добавленный аргумент до chat не дойдёт.
+		if wantsPositionalMeetingID(args) && !hasPositionalMeetingID(args) {
 			args = append(args, a.lastMeeting)
+		} else if args[0] == "chat" {
+			args = append(args, "-m", a.lastMeeting)
 		}
 	}
 
@@ -151,10 +153,10 @@ func (a *App) executeLine(ctx context.Context, args []string) error {
 	return cmd.ExecuteContext(ctx)
 }
 
-// hasPositionalMeetingID сообщает, передан ли идентификатор встречи аргументом.
-// У status, get, summary, retry, delete и export это первый аргумент.
-func hasPositionalMeetingID(args []string) bool {
-	if len(args) < 2 {
+// wantsPositionalMeetingID сообщает, ждёт ли команда идентификатор встречи
+// аргументом. У chat он передаётся флагом -m, поэтому сюда не входит.
+func wantsPositionalMeetingID(args []string) bool {
+	if len(args) == 0 {
 		return false
 	}
 
@@ -163,6 +165,11 @@ func hasPositionalMeetingID(args []string) bool {
 		return true
 	}
 	return false
+}
+
+// hasPositionalMeetingID сообщает, передан ли идентификатор встречи аргументом.
+func hasPositionalMeetingID(args []string) bool {
+	return len(args) >= 2 && wantsPositionalMeetingID(args)
 }
 
 // flagValue возвращает значение флага в формах `-m x`, `--meeting x`, `--meeting=x`.
@@ -238,7 +245,7 @@ func printShellHelp(a *App) {
 	a.println("  get [<id>]         транскрипция")
 	a.println("  summary [<id>]     краткая выжимка")
 	a.println("  find <слово>       поиск по своим встречам")
-	a.println(`  chat "вопрос"     вопрос по материалам встречи`)
+	a.println(`  chat "вопрос"      вопрос по материалам встречи`)
 	a.println("  retry [<id>]       повторить обработку")
 	a.println("  delete [<id>]      удалить встречу")
 	a.println("  export [<id>]      сохранить транскрипцию в файл")
