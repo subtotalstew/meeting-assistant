@@ -13,7 +13,8 @@
 |---|---|---|
 | CLI | `spf13/cobra` | 11 команд со своими флагами; `RunE`, `ExecuteContext`, готовый `--help` |
 | Бизнес-логика | чистая Go, без зависимостей | не знает ни про cobra, ни про pgx, ни про HTTP |
-| БД | PostgreSQL 16, `jackc/pgx/v5` | нативный протокол, `pgxpool`, `BeginFunc`, типизированные ошибки |
+| БД | PostgreSQL 16, `jackc/pgx/v5` | нативный протокол, `pgxpool`, явные транзакции, `FOR UPDATE SKIP LOCKED` |
+| Очередь задач | `processing_tasks` в PostgreSQL | задачи переживают рестарт и видны всем процессам; в памяти Go — пул воркеров и канал |
 | Миграции | `pressly/goose/v3` + `//go:embed` | транзакция на миграцию, нет `dirty`-состояния |
 | Внешние API | интерфейсы + `net/http` | `mock` для тестов и демо, реальные провайдеры — через конфигурацию |
 | Логи | `log/slog`, JSON | структурированные события в stderr |
@@ -64,6 +65,7 @@ worker:
   concurrency: 4
   queue_size: 64
   task_timeout: 10m
+  poll_interval: 500ms
 auto_migrate: true
 ```
 
@@ -89,8 +91,9 @@ auto_migrate: true
 | `LLM_PROVIDER` | `mock` | реализация LLM-клиента: `mock` |
 | `LLM_TIMEOUT` | `90s` | таймаут одного вызова модели |
 | `WORKER_CONCURRENCY` | `4` | сколько встреч обрабатывается одновременно (1–64) |
-| `WORKER_QUEUE_SIZE` | `64` | размер буфера очереди задач |
+| `WORKER_QUEUE_SIZE` | `64` | размер буфера между диспетчером и воркерами |
 | `TASK_TIMEOUT` | `10m` | предел на весь цикл обработки одной встречи |
+| `WORKER_POLL_INTERVAL` | `500ms` | как часто диспетчер забирает задачи из базы в простое (10ms–30s) |
 | `TEST_DATABASE_URL` | — | база для интеграционных тестов; без неё они пропускаются |
 
 Некорректное значение — отказ стартовать с перечислением **всех** проблем сразу.
@@ -101,18 +104,18 @@ auto_migrate: true
 | Команда | Что делает |
 |---|---|
 | `start --user <id>` | регистрирует пользователя и печатает его идентификатор |
-| `load <path> --user <id>` | создаёт встречу и задачу, ждёт завершения обработки |
+| `load <path> --user <id>` | создаёт встречу и задачу и ставит её в очередь (`--wait` — дождаться результата) |
 | `list --user <id>` | встречи пользователя: id, дата, статус, описание |
 | `status <id> --user <id>` | статус, даты, число попыток, текст ошибки |
 | `get <id> --user <id>` | полная транскрипция |
 | `summary <id> --user <id>` | краткая выжимка |
 | `find <keyword> --user <id>` | поиск по своим встречам с фрагментом текста |
 | `chat "<вопрос>" -m <id> --user <id>` | вопрос по материалам встречи |
-| `retry <id> --user <id>` | повторная обработка встречи в статусе failed |
+| `retry <id> --user <id>` | ставит в очередь встречу в статусе failed (`--wait` — дождаться результата) |
 | `delete <id> --user <id>` | удаление встречи и связанных данных |
 | `export <id> --user <id> [--out file]` | сохранение транскрипции в файл |
 | `stats --user <id>` | статусы, среднее время обработки, число вопросов |
-| `serve` | только фоновая обработка, до Ctrl+C |
+| `serve` | пул обработчиков и диспетчер очереди, до Ctrl+C |
 
 Флаг `--json` включает машинный вывод, `--user` задаёт пользователя.
 
@@ -129,31 +132,55 @@ auto_migrate: true
 
 ```bash
 echo "demo" > fail-meeting.ogg
-meeting-assistant load fail-meeting.ogg --user alice   # статус failed
+meeting-assistant load fail-meeting.ogg --user alice --wait   # статус failed
 meeting-assistant status <id> --user alice              # текст ошибки, попыток: 1
-meeting-assistant retry <id> --user alice               # попыток: 2, снова failed
+meeting-assistant retry <id> --user alice --wait        # попыток: 2, снова failed
 ```
 
 ### Где живёт фоновая обработка
 
-Воркеры запускаются в том же процессе, что и CLI, поэтому `load` по умолчанию
-дожидается завершения: иначе процесс завершится и задача останется в очереди.
-Для асинхронного сценария — два процесса:
+Задача создаётся в PostgreSQL в статусе `created` — это и есть очередь. Задачи
+из неё забирает **диспетчер**: горутина, которая раз в `poll_interval` делает
+`UPDATE ... FOR UPDATE SKIP LOCKED` и передаёт забранные встречи в канал пула.
+Воркеров ровно `concurrency`, поэтому одновременно обрабатывается не больше
+задач, чем указано.
 
-```bash
-meeting-assistant load meeting.ogg --user alice --no-wait   # только создать задачу
-meeting-assistant serve                                     # разобрать очередь
-meeting-assistant status <id> --user alice                  # наблюдать прогресс
+```text
+load  ──INSERT──▶ processing_tasks (created)
+                        │
+serve:                  │
+  диспетчер ────────────┘  ATMARNO: claim + SKIP LOCKED
+        │
+        ▼
+   канал ──▶ N воркеров ──▶ speech/LLM ──▶ статусы в БД
 ```
 
-`serve` при старте возвращает в очередь задачи, прерванные прошлым запуском,
-поэтому «потерянных» встреч не остаётся.
+Отсюда два режима:
+
+```bash
+# асинхронный: serve уже работает, load только ставит задачу
+meeting-assistant serve                                   # терминал 1
+meeting-assistant load meeting.ogg --user alice            # терминал 2, возвращается сразу
+meeting-assistant status <id> --user alice                # наблюдать прогресс
+
+# один терминал: обработка в этом же процессе, ждём результата
+meeting-assistant load meeting.ogg --user alice --wait
+```
+
+Почему задачи переживают всё:
+
+- **Ctrl+C при `serve`** — текущая задача возвращается в `created` и продолжится
+  после рестарта (это не сбой, поэтому не `failed`).
+- **процесс убили (`kill -9`)** — задача осталась в `processing`; диспетчер
+  возвращает её в `created`, когда аренда (`task_timeout + 1m`) истечёт.
+- **два `serve` одновременно** — `SKIP LOCKED` не даёт им взять одну задачу дважды.
+- **`serve` при старте** — возвращает в очередь задачи, прерванные прошлым запуском.
 
 ### Сквозной сценарий
 
 ```bash
 meeting-assistant start --user alice
-meeting-assistant load ./meeting.ogg --user alice
+meeting-assistant load ./meeting.ogg --user alice --wait
 meeting-assistant list --user alice
 meeting-assistant summary <id> --user alice
 meeting-assistant find "релиз" --user alice
@@ -181,23 +208,36 @@ SQL-файлы лежат в `migrations/` и встроены в бинарни
 
 | Документ | Содержание |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | слои и зависимости, ER-схема, жизненный цикл статусов, асинхронность, права доступа, обработка ошибок |
-| [docs/DEMO.md](docs/DEMO.md) | пошаговый сценарий демонстрации под защиту |
 | [config.example.yaml](config.example.yaml) | конфигурация со всеми полями и комментариями |
 
 ## Архитектура
 
 ```
 cmd/meeting-assistant   сборка зависимостей, graceful shutdown
-internal/config         конфигурация из окружения
+internal/config         конфигурация: умолчания → YAML → окружение
 internal/logging        структурированный логгер
 internal/domain         сущности, статусы, доменные ошибки      ← веха storage
-internal/storage        PostgreSQL: репозитории, миграции        ← веха storage
-internal/client         SpeechClient / LLMClient + mock + real   ← веха clients
+internal/storage        PostgreSQL: репозитории, миграции, claim   ← веха storage
+internal/client         SpeechClient / LLMClient + mock         ← веха clients
 internal/service        use cases, проверка прав доступа         ← веха service
-internal/worker         пул обработчиков, лимит параллелизма     ← веха worker
+internal/worker         диспетчер очереди, пул, лимит параллелизма ← веха worker
 internal/cli            cobra-команды                            ← веха cli
 ```
+
+Зависимости идут внутрь: `cli → service → domain`. Слои `service`, `domain`
+и `worker` не импортируют cobra, pgx и HTTP-клиенты.
+
+### Что используется из конкурентности Go
+
+| Механизм | Где | Зачем |
+|---|---|---|
+| горутины + канал | `internal/worker/pool.go` | воркеры читают задачи из буферизованного канала |
+| диспетчер | `internal/worker/pool.go` | одна горутина забирает задачи из базы и будит пул |
+| `context` | все слои | таймауты RPC и клиентов, отмена при остановке |
+| `context.WithoutCancel` | `processor.go` | записать итог, когда контекст задачи уже отменён |
+| `sync.WaitGroup` + `sync.Once` | `pool.go` | корректная остановка, идемпотентные `Start`/`Stop` |
+| `atomic` | `pool.go` | счётчики `active`/`started` без мьютекса |
+| `goleak` + `-race` | тесты | нет утечек горутин и гонок данных |
 
 ## Разработка
 
@@ -212,7 +252,7 @@ internal/cli            cobra-команды                            ← ве
 | `feature/worker` | асинхронная обработка, лимит, graceful shutdown |
 | `feature/cli` | cobra-команды и сквозной сценарий |
 | `feature/search-and-extras` | полнотекстовый поиск, retry, delete, export, stats |
-| `feature/real-providers` | адаптеры Yandex SpeechKit и GigaChat за конфигурацией |
+| `feature/long-live-handler` | очередь в PostgreSQL, диспетчер, восстановление по аренде, `load --wait` |
 
 ## CI
 

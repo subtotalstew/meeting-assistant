@@ -32,11 +32,11 @@ const (
 // Store — то, что обработчику нужно от хранилища.
 type Store interface {
 	GetMeetingByID(ctx context.Context, id uuid.UUID) (domain.Meeting, error)
-	StartProcessing(ctx context.Context, meetingID uuid.UUID) (domain.Task, error)
 	SaveTranscription(ctx context.Context, transcription domain.Transcription) error
 	SaveSummary(ctx context.Context, summary domain.Summary) error
 	CompleteProcessing(ctx context.Context, meetingID uuid.UUID) error
 	MarkFailed(ctx context.Context, meetingID uuid.UUID, reason string) error
+	RequeueInterrupted(ctx context.Context, meetingID uuid.UUID) error
 }
 
 // Processor выполняет полный цикл обработки одной встречи.
@@ -68,7 +68,7 @@ func NewProcessor(store Store, speechClient speech.Client, llmClient llm.Client,
 		logger = slog.Default()
 	}
 	if cfg.TaskTimeout <= 0 {
-		cfg.TaskTimeout = 10 * time.Minute
+		cfg.TaskTimeout = defaultTaskTimeout
 	}
 
 	return &Processor{
@@ -82,8 +82,11 @@ func NewProcessor(store Store, speechClient speech.Client, llmClient llm.Client,
 
 // Process обрабатывает встречу: транскрипция, выжимка, завершение.
 //
-// При любой ошибке задача переводится в failed с понятным пользователю текстом,
-// поэтому status <id> всегда показывает причину, а не «висит в processing».
+// Задачу в работу переводит не обработчик, а тот, кто её забрал из очереди
+// (ClaimTasks или Enqueue внутри процесса). Раньше это делал StartProcessing
+// прямо здесь, и у задачи оказывалось два владельца: взявший из очереди и
+// взявший при старте обработки. Теперь статус processing означает «задача
+// захвачена», и повторно её никто не возьмёт.
 func (p *Processor) Process(ctx context.Context, meetingID uuid.UUID) error {
 	taskCtx, cancel := context.WithTimeout(ctx, p.config.TaskTimeout)
 	defer cancel()
@@ -91,12 +94,6 @@ func (p *Processor) Process(ctx context.Context, meetingID uuid.UUID) error {
 	meeting, err := p.store.GetMeetingByID(taskCtx, meetingID)
 	if err != nil {
 		return p.fail(ctx, meetingID, fmt.Errorf("встреча недоступна: %w", err))
-	}
-
-	if _, err := p.store.StartProcessing(taskCtx, meetingID); err != nil {
-		// Задачу уже взял другой обработчик или она не в статусе created.
-		// Это не сбой обработки: статус встречи менять не нужно.
-		return fmt.Errorf("взять задачу в работу: %w", err)
 	}
 
 	p.log.Info("обработка встречи начата",
@@ -217,13 +214,30 @@ func (p *Processor) summarize(ctx context.Context, meeting domain.Meeting, trans
 
 // fail сохраняет ошибку и переводит задачу в failed.
 //
-// Для записи используется контекст без отмены: если обработка прервана таймаутом
-// или остановкой приложения, статус всё равно должен оказаться в базе.
+// Отмена по остановке приложения — отдельный случай: это не сбой обработки,
+// а прерванная работа. Такую задачу возвращаем в created, чтобы следующий
+// запуск её продолжил. Таймаут задачи отменой не считается: там обработка
+// действительно не уложилась, и статус failed честнее.
+//
+// Для записи используется контекст без отмены: контекст задачи к этому моменту
+// уже может быть мёртв, а статус всё равно должен оказаться в базе.
 func (p *Processor) fail(ctx context.Context, meetingID uuid.UUID, cause error) error {
 	reason := humanizeError(cause)
 
 	failCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), failSaveTimeout)
 	defer cancel()
+
+	if p.interrupted(ctx, cause) {
+		if err := p.store.RequeueInterrupted(failCtx, meetingID); err != nil {
+			return errors.Join(cause, fmt.Errorf("возврат прерванной задачи в очередь: %w", err))
+		}
+
+		p.log.Info("обработка встречи прервана остановкой, задача возвращена в очередь",
+			"meeting_id", meetingID.String(),
+		)
+
+		return cause
+	}
 
 	if err := p.store.MarkFailed(failCtx, meetingID, reason); err != nil {
 		return errors.Join(cause, fmt.Errorf("сохранение ошибки обработки: %w", err))
@@ -235,6 +249,18 @@ func (p *Processor) fail(ctx context.Context, meetingID uuid.UUID, cause error) 
 	)
 
 	return cause
+}
+
+// interrupted сообщает, прервана ли задача остановкой приложения.
+//
+// Признак — контекст приложения отменён, а ошибка пришла от отмены, а не от
+// собственного таймаута задачи. Таймаут задачи — это ошибка обработки, отмена
+// родительского контекста — остановка процесса (Ctrl+C, SIGTERM).
+func (p *Processor) interrupted(ctx context.Context, cause error) bool {
+	if !errors.Is(cause, context.Canceled) {
+		return false
+	}
+	return ctx.Err() == context.Canceled
 }
 
 // humanizeError делает текст ошибки понятным пользователю.

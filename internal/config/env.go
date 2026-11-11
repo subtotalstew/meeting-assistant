@@ -56,6 +56,9 @@ func (e *env) apply(cfg *Config) {
 	if value, ok := e.durationInRange("TASK_TIMEOUT", taskTimeoutRange.min, taskTimeoutRange.max); ok {
 		cfg.Worker.TaskTimeout = value
 	}
+	if value, ok := e.durationInRange("WORKER_POLL_INTERVAL", pollIntervalRange.min, pollIntervalRange.max); ok {
+		cfg.Worker.PollInterval = value
+	}
 	if value, ok := e.durationInRange("SHUTDOWN_TIMEOUT", shutdownTimeoutRange.min, shutdownTimeoutRange.max); ok {
 		cfg.ShutdownTimeout = value
 	}

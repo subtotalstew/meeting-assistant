@@ -62,11 +62,11 @@ type App struct {
 	stdout io.Writer
 	stderr io.Writer
 
-	userID      string
-	jsonOutput  bool
-	noWait      bool
-	waitTimeout time.Duration
-	chatMeeting string
+	userID        string
+	jsonOutput    bool
+	waitForResult bool
+	waitTimeout   time.Duration
+	chatMeeting   string
 }
 
 // Execute собирает команды и выполняет их.
