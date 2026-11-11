@@ -150,11 +150,11 @@ func (a *App) printLoaded(meeting domain.Meeting, status *service.MeetingStatus)
 	a.printf("файл: %s\n", meeting.FileName)
 	a.printf("статус: %s\n", finalStatus)
 
-	switch {
-	case finalStatus == domain.StatusCreated:
+	switch finalStatus {
+	case domain.StatusCreated:
 		a.printf("обработку заберёт диспетчер (serve); статус: meeting-assistant status %s --user %s\n",
 			meeting.ID, a.userID)
-	case finalStatus == domain.StatusFailed:
+	case domain.StatusFailed:
 		a.printf("ошибка: %s\n", orEmpty(errText))
 	default:
 		a.printf("транскрипция: meeting-assistant get %s --user %s\n", meeting.ID, a.userID)
