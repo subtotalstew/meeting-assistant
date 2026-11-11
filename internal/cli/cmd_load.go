@@ -13,19 +13,20 @@ import (
 	"github.com/subtotalstew/meeting-assistant/internal/service"
 )
 
-// loadCommand загружает файл встречи и ставит задачу обработки.
+// loadCommand загружает файл встречи и ставит задачу в очередь.
 //
-// Воркеры живут в этом же процессе, поэтому по умолчанию команда дожидается
-// завершения обработки: иначе процесс завершится и задача останется в очереди.
-// Для асинхронного сценария есть --no-wait в паре с командой serve.
+// По умолчанию команда только создаёт встречу и задачу и сразу возвращает
+// управление: обработку заберёт диспетчер — в этом процессе, если он был
+// запущен (--wait), или в отдельном serve. Для демонстрации в одном окне
+// есть --wait: он поднимает локальный пул и дожидается результата.
 func (a *App) loadCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "load <path>",
 		Short: "Загрузить аудио- или тестовый файл встречи",
-		Long: `Создаёт встречу и задачу обработки, ставит задачу в очередь и ждёт завершения.
+		Long: `Создаёт встречу и задачу обработки и ставит задачу в очередь.
 
-Обработку выполняет пул воркеров этого же процесса. Чтобы загрузка не ждала
-распознавания, используйте --no-wait и отдельный процесс: meeting-assistant serve.`,
+Дальше задачу забирает диспетчер: в отдельном процессе serve или, с флагом
+--wait, в этом же процессе. Статус в любой момент виден командой status.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			user, err := a.currentUser(cmd.Context())
@@ -38,11 +39,12 @@ func (a *App) loadCommand() *cobra.Command {
 				return err
 			}
 
-			if a.noWait {
+			if !a.waitForResult {
 				return a.printLoaded(meeting, nil)
 			}
 
-			// Пул нужен до ожидания: без него задача никем не будет обработана.
+			// Пул нужен до ожидания: без него задача никем не будет обработана,
+			// если отдельный serve не запущен.
 			if err := a.startWorker(cmd.Context()); err != nil {
 				return err
 			}
@@ -56,14 +58,19 @@ func (a *App) loadCommand() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&a.noWait, "no-wait", false, "не ждать завершения обработки")
+	cmd.Flags().BoolVar(&a.waitForResult, "wait", false,
+		"дождаться завершения обработки в этом процессе")
 	cmd.Flags().DurationVar(&a.waitTimeout, "wait-timeout", defaultWaitTimeout,
-		"сколько ждать завершения обработки")
+		"сколько ждать завершения обработки (с --wait)")
 
 	return cmd
 }
 
-// startWorker запускает фоновую обработку и восстановление прерванных задач.
+// startWorker запускает фоновую обработку в этом процессе.
+//
+// Recover здесь не вызывается: восстановление прерванных задач делает serve
+// при старте. Сброс всех processing из load сбрасывал бы задачи, которые прямо
+// сейчас обрабатывает другой процесс.
 func (a *App) startWorker(ctx context.Context) error {
 	if a.worker == nil {
 		return errors.New("фоновая обработка недоступна: пул не сконфигурирован")
@@ -71,18 +78,14 @@ func (a *App) startWorker(ctx context.Context) error {
 
 	a.worker.Start(ctx)
 
-	if err := a.worker.Recover(ctx); err != nil {
-		return fmt.Errorf("восстановление задач: %w", err)
-	}
-
 	return nil
 }
 
 // waitForCompletion опрашивает статус встречи, пока обработка не завершится.
 //
-// Пул воркеров работает в этом же процессе, поэтому ожидание — это опрос базы,
-// а не синхронный вызов распознавания. Пользователь при этом может смотреть
-// статус из другого терминала: все переходы фиксируются в базе.
+// Ожидание — это опрос базы, а не синхронный вызов распознавания: задачу в это
+// время обрабатывает пул, в этом процессе или в отдельном serve. Пользователь
+// при этом может смотреть статус из другого терминала: все переходы в базе.
 func (a *App) waitForCompletion(ctx context.Context, userID, meetingID uuid.UUID) (service.MeetingStatus, error) {
 	deadline := time.Now().Add(a.waitTimeout)
 
@@ -99,18 +102,19 @@ func (a *App) waitForCompletion(ctx context.Context, userID, meetingID uuid.UUID
 			return status, nil
 		}
 
-		if time.Now().After(deadline) {
-			return status, fmt.Errorf(
-				"обработка не завершилась за %s, проверьте статус: meeting-assistant status %s --user %s",
-				a.waitTimeout, meetingID, a.userID,
-			)
+		if time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return status, fmt.Errorf("ожидание обработки прервано: %w", ctx.Err())
+			case <-ticker.C:
+				continue
+			}
 		}
 
-		select {
-		case <-ctx.Done():
-			return status, fmt.Errorf("ожидание обработки прервано: %w", ctx.Err())
-		case <-ticker.C:
-		}
+		return status, fmt.Errorf(
+			"обработка не завершилась за %s, проверьте статус: meeting-assistant status %s --user %s",
+			a.waitTimeout, meetingID, a.userID,
+		)
 	}
 }
 
@@ -146,11 +150,11 @@ func (a *App) printLoaded(meeting domain.Meeting, status *service.MeetingStatus)
 	a.printf("файл: %s\n", meeting.FileName)
 	a.printf("статус: %s\n", finalStatus)
 
-	switch {
-	case a.noWait:
-		a.printf("обработка пойдёт в режиме serve; статус: meeting-assistant status %s --user %s\n",
+	switch finalStatus {
+	case domain.StatusCreated:
+		a.printf("обработку заберёт диспетчер (serve); статус: meeting-assistant status %s --user %s\n",
 			meeting.ID, a.userID)
-	case finalStatus == domain.StatusFailed:
+	case domain.StatusFailed:
 		a.printf("ошибка: %s\n", orEmpty(errText))
 	default:
 		a.printf("транскрипция: meeting-assistant get %s --user %s\n", meeting.ID, a.userID)

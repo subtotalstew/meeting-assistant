@@ -1,8 +1,13 @@
 package cli
 
 import (
+	"errors"
+
 	"github.com/spf13/cobra"
 )
+
+// availableCommands — список команд для подсказки в сообщении об ошибке.
+const availableCommands = "start, load, serve, status, list, get, summary, find, chat, retry, delete, export, stats; справка: --help"
 
 // rootCommand собирает дерево команд.
 //
@@ -20,6 +25,14 @@ func (a *App) rootCommand() *cobra.Command {
 Пользователь задаётся флагом --user: при первом обращении он создаётся автоматически.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// Запуск без команды (например, `ma.exe --user alice`) — ошибка, а не
+		// справка: справка в узкой консоли обрезается и не говорит, что делать.
+		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return errors.New("неизвестная команда: " + args[0])
+			}
+			return errors.New("не указана команда: " + availableCommands)
+		},
 	}
 
 	root.PersistentFlags().StringVar(&a.userID, "user", "",

@@ -25,6 +25,7 @@ var (
 	connTimeoutRange     = span{100 * time.Millisecond, time.Minute}
 	clientTimeoutRange   = span{time.Second, 10 * time.Minute}
 	taskTimeoutRange     = span{time.Second, time.Hour}
+	pollIntervalRange    = span{10 * time.Millisecond, 30 * time.Second}
 	shutdownTimeoutRange = span{time.Second, 5 * time.Minute}
 )
 
@@ -93,6 +94,11 @@ func (c Config) validate() error {
 	if !taskTimeoutRange.contains(c.Worker.TaskTimeout) {
 		errs = append(errs, fieldError("worker.task_timeout", c.Worker.TaskTimeout,
 			fmt.Sprintf("вне диапазона [%s, %s]", taskTimeoutRange.min, taskTimeoutRange.max)))
+	}
+
+	if !pollIntervalRange.contains(c.Worker.PollInterval) {
+		errs = append(errs, fieldError("worker.poll_interval", c.Worker.PollInterval,
+			fmt.Sprintf("вне диапазона [%s, %s]", pollIntervalRange.min, pollIntervalRange.max)))
 	}
 
 	if !shutdownTimeoutRange.contains(c.ShutdownTimeout) {

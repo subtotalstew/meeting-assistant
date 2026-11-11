@@ -10,17 +10,16 @@ flowchart TD
     CLI["internal/cli<br/>cobra, вывод, флаги"]
     SVC["internal/service<br/>сценарии, проверка прав"]
     DOM["internal/domain<br/>сущности, статусы, ошибки"]
-    PG["internal/storage/postgres<br/>SQL, транзакции, миграции"]
+    PG["internal/storage/postgres<br/>SQL, транзакции, миграции, claim"]
     CLI2["internal/client/speech<br/>SpeechClient + mock"]
     CLI3["internal/client/llm<br/>LLMClient + mock"]
-    WK["internal/worker<br/>очередь, пул, обработка"]
+    WK["internal/worker<br/>диспетчер, пул, обработка"]
 
     CLI --> SVC
     SVC --> DOM
     SVC -.->|порты| PG
-    SVC -.->|TaskQueue| WK
     WK --> DOM
-    WK -.->|портированные интерфейсы| PG
+    WK -.->|QueueStore + Store| PG
     WK --> CLI2
     WK --> CLI3
     PG --> DOM
@@ -40,9 +39,14 @@ flowchart TD
 | `Worker` | `internal/cli` | `*worker.Pool` |
 | `Repository` | `internal/service` | `*postgres.Store` |
 | `TaskQueue` | `internal/service` | `*worker.Pool` |
+| `QueueStore` | `internal/worker` | `*postgres.Store` |
 | `Store` | `internal/worker` | `*postgres.Store` |
 | `SpeechClient` | `internal/client/speech` | `speech.Mock` |
 | `LLMClient` | `internal/client/llm` | `llm.Mock` |
+
+Два интерфейса пула отражают два пути постановки задачи: `TaskQueue` — быстрый
+путь внутри процесса (`load --wait` кладёт задачу в канал напрямую), `QueueStore` —
+путь через базу (`ClaimTasks`, `ReclaimStale`, `RecoverPending`).
 
 ## Модель данных
 
@@ -106,7 +110,8 @@ erDiagram
 | `meetings(user_id, created_at desc)` | `list` |
 | `meetings(user_id, status)` | `stats`, выборки по статусу |
 | `processing_tasks(status)` | восстановление незавершённых задач |
-| `processing_tasks(meeting_id)` | `status <id>`, `retry <id>` |
+| `processing_tasks(status, created_at)` | выборка очереди диспетчером |
+| `processing_tasks(meeting_id)` UNIQUE | `status <id>`, `retry <id>`; одна встреча — одна задача |
 | `qa_history(meeting_id, created_at)` | история вопросов |
 | GIN `to_tsvector('russian', text)` на `transcriptions` и `summaries` | полнотекстовый `find` |
 
@@ -115,18 +120,23 @@ erDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> created
-    created --> processing: воркер взял задачу
+    created --> processing: диспетчер забрал задачу (ClaimTasks)
     processing --> transcribed: транскрипция сохранена
     transcribed --> summarized: выжимка сохранена
     summarized --> completed: обработка завершена
+    processing --> created: остановка приложения (Ctrl+C)
+    processing --> created: аренда истекла (ReclaimStale)
     processing --> failed: ошибка клиента
     transcribed --> failed: ошибка LLM
     summarized --> failed: ошибка сохранения
     failed --> created: retry <id>
 ```
 
-Переходы описаны в `internal/domain/status.go` и проверяются методом
-`Status.Transition`. Статус встречи и статус задачи меняются в одной транзакции:
+Граф описан в `internal/domain/status.go` и покрыт юнит-тестами. Проверку
+переходов при записи выполняет инфраструктурный слой, а не модель: `ClaimTasks`
+переводит только `created → processing`, `ReclaimStale` и `RequeueInterrupted` —
+только `processing → created`, остальные переходы делает `markStatus` в транзакции
+сохранения результата. Статус встречи и статус задачи меняются в одной транзакции:
 пользователь смотрит на встречу, обработчик — на задачу, и расхождение выглядит
 как зависание.
 
@@ -137,14 +147,16 @@ sequenceDiagram
     participant U as Пользователь
     participant S as service
     participant DB as PostgreSQL
+    participant D as worker dispatcher
     participant P as worker.Pool
     participant C as speech/LLM
 
     U->>S: load meeting.ogg
-    S->>DB: INSERT meeting + task (одна транзакция)
-    S->>P: Enqueue(meetingID)
+    S->>DB: INSERT meeting + task (одна транзакция, status=created)
     S-->>U: встреча создана, статус created
-    P->>DB: UPDATE task -> processing
+    D->>DB: ClaimTasks (FOR UPDATE SKIP LOCKED)
+    DB-->>D: meeting_id, status -> processing
+    D->>P: meetingID в канал
     P->>C: Transcribe
     C-->>P: текст
     P->>DB: INSERT transcription + статус transcribed
@@ -155,15 +167,54 @@ sequenceDiagram
     S-->>U: completed
 ```
 
-- Очередь — буферизованный канал, пул — `WORKER_CONCURRENCY` горутин.
-- Лимит параллелизма задаётся числом воркеров, а не семафором: количество горутин
-  постоянно, лишние задачи ждут в буфере. Переполнение даёт `ErrQueueFull`,
-  задача при этом уже сохранена в базе.
-- `TASK_TIMEOUT` ограничивает весь цикл, `SPEECH_TIMEOUT`/`LLM_TIMEOUT` — каждый
-  вызов. Ошибка записывается в контексте `context.WithoutCancel`: если задачу убил
-  таймаут, её контекст уже мёртв, а статус `failed` записать нужно.
-- `serve` при старте вызывает `RecoverPending`: задачи, застрявшие в
-  `processing/transcribed/summarized`, возвращаются в `created`.
+**Очередь — таблица `processing_tasks`, а не канал.** Канал остался между
+диспетчером и воркерами: он даёт минимальную задержку доставки, но живёт внутри
+процесса и не видит задачи других процессов. База — durable inbox, общий для всех.
+
+Захват задачи одной транзакцией:
+
+```sql
+UPDATE processing_tasks t
+SET status = 'processing', attempts = attempts + 1, started_at = now()
+FROM (SELECT id FROM processing_tasks
+      WHERE status = 'created'
+      ORDER BY created_at
+      FOR UPDATE SKIP LOCKED
+      LIMIT $1) picked
+WHERE t.id = picked.id
+RETURNING t.meeting_id
+```
+
+`SKIP LOCKED` не даёт двум процессам взять одну задачу: занятую строку второй
+пропускает и берёт следующую. `attempts` растёт в момент захвата — если процесс
+умрёт сразу после, попытка всё равно учтена.
+
+Диспетчер — одна горутина в `worker.Pool`:
+
+- `select` по трём источникам: `ctx.Done()`, тикер, `kick` (новая задача в этом
+  же процессе — не ждём тик);
+- пачка ограничена свободными слотами (`concurrency − active − len(queue)`),
+  поэтому лишнее остаётся в `created`, а не висит в памяти;
+- интервал адаптивный: `WORKER_POLL_INTERVAL` при работе, до 2 с в простое.
+
+Лимит параллелизма задаётся числом воркеров, а не семафором: количество горутин
+постоянно (`concurrency + 1`). `TASK_TIMEOUT` ограничивает весь цикл,
+`SPEECH_TIMEOUT`/`LLM_TIMEOUT` — каждый вызов.
+
+### Остановка и восстановление
+
+| Событие | Что происходит | Кто продолжит |
+|---|---|---|
+| Ctrl+C / SIGTERM | `RequeueInterrupted`: задача → `created` | следующий запуск |
+| процесс убит `kill -9` | задача остаётся в `processing` | `ReclaimStale` по аренде (`task_timeout + 1m`) |
+| таймаут задачи, ошибка клиента | `MarkFailed`: задача → `failed` | только `retry <id>` |
+| старт `serve` | `RecoverPending`: прерванные прошлым запуском → `created` | этот же процесс |
+
+Запись итога идёт в `context.WithoutCancel` с коротким таймаутом: контекст задачи
+может быть уже мёртв, а статус записать нужно.
+
+Глобальный сброс «все `processing` → `created`» не используется: он сбрасывал бы
+и задачи живого обработчика в соседнем процессе.
 
 ## Права доступа
 
@@ -197,8 +248,8 @@ sequenceDiagram
 
 - `domain.ErrNotFound / ErrValidation / ErrInvalidTransition` — проверяются через
   `errors.Is` в сервисе и CLI, текст ошибки не разбирается.
-- Ошибки БД оборачиваются с слоем (`fmt.Errorf("...: %w", err)`), `pgconn.PgError`
-  разбирается через `errors.As` там, где важен код.
+- Ошибки БД оборачиваются с указанием операции (`fmt.Errorf("...: %w", err)`),
+  наружу отдаётся текст без строки подключения.
 - `ErrNotReady` отделяет «ещё обрабатывается» от «не найдено».
 - CLI возвращает ошибку в `main`, печатает её один раз в stderr, ставит код 1.
 
@@ -208,3 +259,12 @@ sequenceDiagram
 переменные окружения. Проверка диапазонов и форматов выполняется для любого
 источника, все найденные проблемы возвращаются одной ошибкой. Пароль из `DB_DSN`
 редактируется перед попаданием в текст ошибки.
+
+## Тестовые реализации и заменяемость
+
+`main.go` выбирает реализации по `SPEECH_PROVIDER` и `LLM_PROVIDER`. Рантайм
+поддерживает `mock`; для `yandex` и `gigachat` приложение завершается понятной
+ошибкой при старте, а не падает в глубине обработки. Добавление реального клиента
+не меняет ни `service`, ни `worker`: нужно объявить структуру с методами
+интерфейса (`Transcribe`/`Provider` или `Summarize`/`Answer`/`Provider`) и
+добавить ветку в `newSpeechClient`/`newLLMClient`.

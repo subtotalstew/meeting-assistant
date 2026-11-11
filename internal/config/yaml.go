@@ -39,9 +39,10 @@ type fileConfig struct {
 	} `yaml:"llm"`
 
 	Worker struct {
-		Concurrency *int      `yaml:"concurrency"`
-		QueueSize   *int      `yaml:"queue_size"`
-		TaskTimeout *duration `yaml:"task_timeout"`
+		Concurrency  *int      `yaml:"concurrency"`
+		QueueSize    *int      `yaml:"queue_size"`
+		TaskTimeout  *duration `yaml:"task_timeout"`
+		PollInterval *duration `yaml:"poll_interval"`
 	} `yaml:"worker"`
 
 	ShutdownTimeout *duration `yaml:"shutdown_timeout"`
@@ -148,5 +149,8 @@ func applyWorker(cfg *Config, file fileConfig) {
 	}
 	if file.Worker.TaskTimeout != nil {
 		cfg.Worker.TaskTimeout = time.Duration(*file.Worker.TaskTimeout)
+	}
+	if file.Worker.PollInterval != nil {
+		cfg.Worker.PollInterval = time.Duration(*file.Worker.PollInterval)
 	}
 }

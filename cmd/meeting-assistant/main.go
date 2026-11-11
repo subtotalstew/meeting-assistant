@@ -54,14 +54,14 @@ func run() error {
 	}
 	defer func() {
 		store.Close()
-		logger.Info("соединение с PostgreSQL закрыто")
+		logger.Debug("соединение с PostgreSQL закрыто")
 	}()
 
 	if cfg.AutoMigrate {
 		if err := postgres.Migrate(ctx, store.Pool()); err != nil {
 			return fmt.Errorf("миграции: %w", err)
 		}
-		logger.Info("схема базы данных актуальна")
+		logger.Debug("схема базы данных актуальна")
 	}
 
 	// Реализации внешних клиентов выбираются по конфигурации: ни обработчик,
@@ -83,8 +83,10 @@ func run() error {
 		})
 
 	pool := worker.NewPool(processor, store, logging.WithComponent(logger, "worker"), worker.Config{
-		Concurrency: cfg.Worker.Concurrency,
-		QueueSize:   cfg.Worker.QueueSize,
+		Concurrency:  cfg.Worker.Concurrency,
+		QueueSize:    cfg.Worker.QueueSize,
+		TaskTimeout:  cfg.Worker.TaskTimeout,
+		PollInterval: cfg.Worker.PollInterval,
 	})
 
 	// Пул не запускается здесь: его запускают команды, которым нужна обработка

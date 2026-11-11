@@ -229,6 +229,24 @@ func TestUnknownCommand(t *testing.T) {
 	}
 }
 
+// TestNoCommandIsError: запуск без команды (`ma.exe --user alice`) должен давать
+// понятную ошибку со списком команд, а не обрезанную справку.
+func TestNoCommandIsError(t *testing.T) {
+	stdout, _, err := run(t, &fakeService{}, &fakeWorker{}, "--user", "alice")
+	if err == nil {
+		t.Fatal("ожидалась ошибка: команда не указана")
+	}
+	if !strings.Contains(err.Error(), "не указана команда") {
+		t.Errorf("непонятная ошибка: %v", err)
+	}
+	if !strings.Contains(err.Error(), "load") {
+		t.Errorf("в ошибке нет списка команд: %v", err)
+	}
+	if stdout != "" {
+		t.Errorf("в stdout попала справка: %q", stdout)
+	}
+}
+
 func TestParseMeetingID(t *testing.T) {
 	want := uuid.New()
 

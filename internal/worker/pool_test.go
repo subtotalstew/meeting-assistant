@@ -163,16 +163,102 @@ func TestPoolStopInterruptsInFlightTask(t *testing.T) {
 	}
 }
 
+// Диспетчер сам забирает задачи из базы: задача, созданная после старта пула,
+// должна быть обработана без Enqueue и без перезапуска процесса.
+func TestPoolDispatcherClaimsTasksFromStore(t *testing.T) {
+	processor := &countingProcessor{}
+
+	store := &fakeRecoveryStore{ids: []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}}
+
+	pool := NewPool(processor, store, testLogger(), Config{
+		Concurrency:  2,
+		QueueSize:    8,
+		PollInterval: 10 * time.Millisecond,
+	})
+	pool.Start(context.Background())
+	defer func() {
+		if err := pool.Stop(context.Background()); err != nil {
+			t.Errorf("Stop(): %v", err)
+		}
+	}()
+
+	waitFor(t, 5*time.Second, func() bool { return processor.handled.Load() == 3 })
+
+	if store.claimCalls.Load() == 0 {
+		t.Fatal("диспетчер ни разу не обратился к очереди")
+	}
+}
+
+// Диспетчер не берёт из базы больше, чем свободных слотов: иначе задачи висели бы
+// в памяти процесса, а не в очереди.
+func TestPoolDispatcherRespectsFreeSlots(t *testing.T) {
+	processor := &countingProcessor{delay: 200 * time.Millisecond}
+
+	store := &fakeRecoveryStore{ids: []uuid.UUID{uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()}}
+
+	pool := NewPool(processor, store, testLogger(), Config{
+		Concurrency:  2,
+		QueueSize:    8,
+		PollInterval: 10 * time.Millisecond,
+	})
+	pool.Start(context.Background())
+	defer func() {
+		if err := pool.Stop(context.Background()); err != nil {
+			t.Errorf("Stop(): %v", err)
+		}
+	}()
+
+	// За две сотни миллисекунд диспетчер успел бы сделать несколько тиков,
+	// если бы не учитывал занятость. Лимит одного запроса — 2 слота.
+	time.Sleep(80 * time.Millisecond)
+
+	waitFor(t, 5*time.Second, func() bool { return processor.handled.Load() == 5 })
+
+	if peak := processor.peak(); peak > 2 {
+		t.Fatalf("одновременных обработок %d, лимит 2", peak)
+	}
+}
+
+// Ошибка возврата зависших задач не останавливает разбор очереди.
+func TestPoolDispatcherContinuesAfterReclaimError(t *testing.T) {
+	processor := &countingProcessor{}
+
+	store := &fakeRecoveryStore{
+		ids:        []uuid.UUID{uuid.New()},
+		reclaimErr: errors.New("база недоступна"),
+	}
+
+	pool := NewPool(processor, store, testLogger(), Config{
+		Concurrency:  1,
+		QueueSize:    4,
+		PollInterval: 10 * time.Millisecond,
+		TaskTimeout:  time.Minute,
+	})
+	pool.Start(context.Background())
+	defer func() {
+		if err := pool.Stop(context.Background()); err != nil {
+			t.Errorf("Stop(): %v", err)
+		}
+	}()
+
+	waitFor(t, 5*time.Second, func() bool { return processor.handled.Load() == 1 })
+
+	lease, _ := store.lastLease.Load().(time.Duration)
+	if lease <= time.Minute {
+		t.Errorf("аренда %s: должна быть больше бюджета задачи", lease)
+	}
+}
+
 func TestPoolConfigWithDefaults(t *testing.T) {
 	cases := []struct {
 		name string
 		in   Config
 		want Config
 	}{
-		{name: "нули", in: Config{}, want: Config{Concurrency: defaultConcurrency, QueueSize: defaultQueueSize}},
-		{name: "отрицательные", in: Config{Concurrency: -5, QueueSize: -1}, want: Config{Concurrency: defaultConcurrency, QueueSize: defaultQueueSize}},
-		{name: "выше предела", in: Config{Concurrency: 1000, QueueSize: 10}, want: Config{Concurrency: maxConcurrency, QueueSize: 10}},
-		{name: "корректные", in: Config{Concurrency: 3, QueueSize: 7}, want: Config{Concurrency: 3, QueueSize: 7}},
+		{name: "нули", in: Config{}, want: Config{Concurrency: defaultConcurrency, QueueSize: defaultQueueSize, TaskTimeout: defaultTaskTimeout, PollInterval: defaultPollInterval}},
+		{name: "отрицательные", in: Config{Concurrency: -5, QueueSize: -1, TaskTimeout: -time.Second}, want: Config{Concurrency: defaultConcurrency, QueueSize: defaultQueueSize, TaskTimeout: defaultTaskTimeout, PollInterval: defaultPollInterval}},
+		{name: "выше предела", in: Config{Concurrency: 1000, QueueSize: 10}, want: Config{Concurrency: maxConcurrency, QueueSize: 10, TaskTimeout: defaultTaskTimeout, PollInterval: defaultPollInterval}},
+		{name: "корректные", in: Config{Concurrency: 3, QueueSize: 7, TaskTimeout: time.Minute, PollInterval: 10 * time.Millisecond}, want: Config{Concurrency: 3, QueueSize: 7, TaskTimeout: time.Minute, PollInterval: 10 * time.Millisecond}},
 	}
 
 	for _, tc := range cases {
@@ -199,16 +285,41 @@ func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
 	t.Fatalf("условие не выполнено за %s", timeout)
 }
 
-// fakeRecoveryStore отдаёт заранее заданный список незавершённых задач.
+// fakeRecoveryStore отдаёт заранее заданный список незавершённых задач
+// и умеет отдавать задачи из очереди по запросу диспетчера.
 type fakeRecoveryStore struct {
 	ids   []uuid.UUID
 	err   error
 	limit int
+
+	// claimCalls — сколько раз диспетчер ходил в очередь.
+	claimCalls atomic.Int64
+	// reclaimErr имитирует сбой возврата зависших задач.
+	reclaimErr error
+	// lastLease — аренда, с которой вызывали ReclaimStale.
+	lastLease atomic.Value
 }
 
 func (f *fakeRecoveryStore) RecoverPending(_ context.Context, limit int) ([]uuid.UUID, error) {
 	f.limit = limit
 	return f.ids, f.err
+}
+
+func (f *fakeRecoveryStore) ClaimTasks(_ context.Context, limit int) ([]uuid.UUID, error) {
+	f.claimCalls.Add(1)
+	f.limit = limit
+
+	batch := f.ids
+	if len(batch) > limit {
+		batch = batch[:limit]
+	}
+	f.ids = f.ids[len(batch):]
+	return batch, f.err
+}
+
+func (f *fakeRecoveryStore) ReclaimStale(_ context.Context, lease time.Duration) ([]uuid.UUID, error) {
+	f.lastLease.Store(lease)
+	return nil, f.reclaimErr
 }
 
 func TestPoolRecoverEnqueuesPendingTasks(t *testing.T) {
