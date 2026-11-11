@@ -249,6 +249,39 @@ func TestPoolDispatcherContinuesAfterReclaimError(t *testing.T) {
 	}
 }
 
+// Одна и та же задача, попавшая в пул и через Enqueue, и через диспетчера,
+// должна обрабатываться ровно один раз.
+func TestPoolHandlesDuplicateDeliveryOnce(t *testing.T) {
+	processor := &countingProcessor{delay: 50 * time.Millisecond}
+	meetingID := uuid.New()
+
+	// Диспетчер отдаёт ту же встречу, что load положил в канал напрямую.
+	store := &fakeRecoveryStore{ids: []uuid.UUID{meetingID}}
+
+	pool := NewPool(processor, store, testLogger(), Config{
+		Concurrency:  4,
+		QueueSize:    8,
+		PollInterval: 10 * time.Millisecond,
+	})
+	pool.Start(context.Background())
+	defer func() {
+		if err := pool.Stop(context.Background()); err != nil {
+			t.Errorf("Stop(): %v", err)
+		}
+	}()
+
+	if err := pool.Enqueue(meetingID); err != nil {
+		t.Fatalf("Enqueue(): %v", err)
+	}
+
+	waitFor(t, 5*time.Second, func() bool { return processor.handled.Load() >= 1 })
+	time.Sleep(150 * time.Millisecond)
+
+	if got := processor.handled.Load(); got != 1 {
+		t.Fatalf("задача обработана %d раз, ожидалась один", got)
+	}
+}
+
 func TestPoolConfigWithDefaults(t *testing.T) {
 	cases := []struct {
 		name string

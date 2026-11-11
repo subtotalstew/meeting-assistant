@@ -39,6 +39,10 @@ func (a *App) loadCommand() *cobra.Command {
 				return err
 			}
 
+			// В интерактивном режиме запоминаем встречу: следующие команды
+			// можно писать без идентификатора.
+			a.lastMeeting = meeting.ID.String()
+
 			if !a.waitForResult {
 				return a.printLoaded(meeting, nil)
 			}

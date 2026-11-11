@@ -59,10 +59,19 @@ func (s *Service) EnsureUser(ctx context.Context, externalID string) (domain.Use
 
 // LoadMeeting проверяет файл, создаёт встречу с задачей обработки и ставит задачу
 // в очередь. Возвращается сразу, не дожидаясь распознавания.
+//
+// Путь к файлу хранится абсолютным: задачу может забрать другой процесс
+// (serve), запущенный из другого каталога, и относительный путь там не найдётся.
 func (s *Service) LoadMeeting(ctx context.Context, userID uuid.UUID, path string) (domain.Meeting, error) {
 	if err := s.validateFile(path); err != nil {
 		return domain.Meeting{}, err
 	}
+
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return domain.Meeting{}, fmt.Errorf("%w: путь к файлу: %v", domain.ErrValidation, err)
+	}
+	path = absolute
 
 	meeting, task, err := domain.NewMeeting(userID, "", path)
 	if err != nil {
@@ -80,7 +89,7 @@ func (s *Service) LoadMeeting(ctx context.Context, userID uuid.UUID, path string
 	)
 
 	// Очередь может быть переполнена. Встреча и задача уже сохранены, поэтому
-	// задачу подхватит восстановление незавершённых задач — терять загрузку нельзя.
+	// задачу заберёт диспетчер из базы — терять загрузку нельзя.
 	if err := s.queue.Enqueue(meeting.ID); err != nil {
 		s.log.Warn("не удалось поставить задачу в очередь",
 			"meeting_id", meeting.ID.String(),

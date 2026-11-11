@@ -122,6 +122,37 @@ type Pool struct {
 	stopped atomic.Bool
 	started atomic.Bool
 	active  atomic.Int64
+
+	// inflight — идентификаторы задач, которые уже взяты в работу.
+	//
+	// Задача может прийти в пул двумя путями: Enqueue от load в этом же процессе
+	// и ClaimTasks от диспетчера. Без учёта она попадает в канал дважды и
+	// обрабатывается параллельно, портя статусы. Карта закрывает окно между
+	// попаданием в канал и началом обработки.
+	infMu    sync.Mutex
+	inflight map[uuid.UUID]struct{}
+}
+
+// claimLocal отмечает задачу как взятую в работу.
+//
+// Возвращает false, если она уже в работе: тогда повторную постановку
+// в канал нужно пропустить, иначе два воркера возьмут одну встречу.
+func (p *Pool) claimLocal(meetingID uuid.UUID) bool {
+	p.infMu.Lock()
+	defer p.infMu.Unlock()
+
+	if _, busy := p.inflight[meetingID]; busy {
+		return false
+	}
+	p.inflight[meetingID] = struct{}{}
+	return true
+}
+
+// releaseLocal снимает отметку после завершения обработки.
+func (p *Pool) releaseLocal(meetingID uuid.UUID) {
+	p.infMu.Lock()
+	defer p.infMu.Unlock()
+	delete(p.inflight, meetingID)
 }
 
 // NewPool создаёт пул обработчиков. Работа начинается только после Start.
@@ -142,6 +173,7 @@ func NewPool(processor taskProcessor, store QueueStore, logger *slog.Logger, cfg
 		config:    cfg,
 		queue:     make(chan uuid.UUID, cfg.QueueSize),
 		kick:      make(chan struct{}, 1),
+		inflight:  make(map[uuid.UUID]struct{}, cfg.Concurrency),
 	}
 }
 
@@ -180,9 +212,17 @@ func (p *Pool) Start(ctx context.Context) {
 //
 // Если очередь полна, возвращается ErrQueueFull: задача уже сохранена в базе
 // в статусе created, поэтому её подхватит диспетчер — терять загрузку нельзя.
+//
+// Возвращает nil и для задачи, которую уже обрабатывает этот пул: диспетчер мог
+// забрать её из базы раньше, чем сюда дошёл вызов. Дубль в канале означал бы
+// две параллельные обработки одной встречи.
 func (p *Pool) Enqueue(meetingID uuid.UUID) error {
 	if p.stopped.Load() {
 		return ErrStopped
+	}
+
+	if !p.claimLocal(meetingID) {
+		return nil
 	}
 
 	select {
@@ -190,6 +230,7 @@ func (p *Pool) Enqueue(meetingID uuid.UUID) error {
 		p.Kick()
 		return nil
 	default:
+		p.releaseLocal(meetingID)
 		return fmt.Errorf("%w: ожидает обработки %d", ErrQueueFull, len(p.queue))
 	}
 }
@@ -315,9 +356,16 @@ func (p *Pool) claimOnce(ctx context.Context) bool {
 	}
 
 	for _, meetingID := range tasks {
+		if !p.claimLocal(meetingID) {
+			// Эту задачу уже обрабатывает этот процесс: load положил её
+			// в канал напрямую, а диспетчер успел забрать её из базы.
+			continue
+		}
+
 		select {
 		case p.queue <- meetingID:
 		case <-ctx.Done():
+			p.releaseLocal(meetingID)
 			// Захваченная задача осталась в processing и вернётся в очередь
 			// по lease при следующем старте.
 			return len(tasks) > 0
@@ -398,6 +446,7 @@ func (p *Pool) worker(ctx context.Context, number int) {
 func (p *Pool) handle(ctx context.Context, number int, meetingID uuid.UUID) {
 	p.active.Add(1)
 	defer p.active.Add(-1)
+	defer p.releaseLocal(meetingID)
 
 	started := time.Now()
 

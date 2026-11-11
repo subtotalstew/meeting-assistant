@@ -15,6 +15,10 @@ const availableCommands = "start, load, serve, status, list, get, summary, find,
 // справку при ошибке выполнения и не должна дублировать сообщение об ошибке —
 // это делает main, один раз и в stderr.
 func (a *App) rootCommand() *cobra.Command {
+	// Режим фиксируется по исходным аргументам: значения флагов cobra пишет в
+	// поля App при разборе, и проверять их после разбора ненадёжно.
+	shell := a.shell
+
 	root := &cobra.Command{
 		Use:   "meeting-assistant",
 		Short: "Умный помощник для конспектирования встреч",
@@ -27,18 +31,28 @@ func (a *App) rootCommand() *cobra.Command {
 		SilenceErrors: true,
 		// Запуск без команды (например, `ma.exe --user alice`) — ошибка, а не
 		// справка: справка в узкой консоли обрезается и не говорит, что делать.
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
 				return errors.New("неизвестная команда: " + args[0])
+			}
+			// Без команды, но с --user и --shell: сразу в интерактивный режим.
+			if shell {
+				if _, err := a.currentUser(cmd.Context()); err != nil {
+					return err
+				}
+				a.userID = a.userFlag
+				return nil
 			}
 			return errors.New("не указана команда: " + availableCommands)
 		},
 	}
 
-	root.PersistentFlags().StringVar(&a.userID, "user", "",
+	root.PersistentFlags().StringVar(&a.userFlag, "user", "",
 		"идентификатор пользователя; обязателен для всех команд, кроме start")
 	root.PersistentFlags().BoolVar(&a.jsonOutput, "json", false,
 		"выводить результат в JSON для машинной обработки")
+	root.PersistentFlags().BoolVar(&a.shell, "shell", false,
+		"после команды открыть интерактивный режим (или сразу, если команды нет)")
 
 	root.AddCommand(
 		a.startCommand(),
