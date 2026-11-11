@@ -292,8 +292,6 @@ type fakeRecoveryStore struct {
 	err   error
 	limit int
 
-	// claim — задачи, которые «лежат в очереди» для диспетчера.
-	claim []uuid.UUID
 	// claimCalls — сколько раз диспетчер ходил в очередь.
 	claimCalls atomic.Int64
 	// reclaimErr имитирует сбой возврата зависших задач.
