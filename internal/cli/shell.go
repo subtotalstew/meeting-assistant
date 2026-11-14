@@ -112,7 +112,11 @@ func (a *App) runShellFrom(ctx context.Context, name string, in io.Reader) error
 			}
 		case <-signals:
 			cancel()
-			<-done
+			// Дожидаемся горутины команды. После отмены ожидаем context.Canceled:
+			// его не выводим, чтобы не дублировать сообщение о прерывании.
+			if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+				a.printf("ошибка: %v\n", err)
+			}
 			cmdCtx, cancel = context.WithCancel(ctx)
 			a.printf("\nкоманда прервана\n")
 		}
