@@ -28,10 +28,8 @@ coverage.html
 tmp/
 .cache/
 
-# Учебные материалы: ТЗ, критерии и локальные конспекты не являются частью
-# дипломного репозитория и не должны попадать в историю.
-docs/ПЛАН.md
-docs/РАЗБОР.md
-docs/technical_specification.md
-docs/graduation_tesis.md
-docs/DEMO.md
+# Учебные материалы и локальные документы не являются частью дипломного
+# репозитория и не должны попадать в историю. В upstream остаётся только
+# ARCHITECTURE.md.
+docs/*.md
+!docs/ARCHITECTURE.md
