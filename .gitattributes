@@ -1,0 +1,18 @@
+# Единые переводы строк независимо от ОС, чтобы PR не тонули в CRLF-шуме.
+* text=auto eol=lf
+
+# Скрипты Windows всё же с CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Бинарные файлы.
+*.png binary
+*.jpg binary
+*.ogg binary
+*.mp3 binary
+*.wav binary
+*.ico binary
+
+# Пусть git не пытается склеивать чужие диффы.
+go.sum merge=union
